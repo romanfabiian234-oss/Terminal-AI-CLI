@@ -15,10 +15,10 @@ from .core import ScreenText
 
 
 def run_raw_command(shell: str, command: str, cwd: Path, max_lines: int) -> tuple[int, ScreenText]:
-    """Keep the child's original terminal rendering; collect only a bounded transcript.
+    """Keep the child's original rendering, without recording screen redraws.
 
-    AI explanations are displayed after returning to block mode. This avoids
-    corrupting fullscreen interfaces with unrelated status messages.
+    Full-screen UI frames are not command logs. Capturing and replaying them
+    as lines breaks the layout and may expose sensitive interactive content.
     """
     if not os.isatty(sys.stdin.fileno()) or not os.isatty(sys.stdout.fileno()):
         raise ValueError("Direct PTY mode requires an interactive terminal")
@@ -74,7 +74,6 @@ def run_raw_command(shell: str, command: str, cwd: Path, max_lines: int) -> tupl
                     data = b''
                 if not data:
                     break
-                output.feed(data)
                 os.write(sys.stdout.fileno(), data)
         _, status = os.waitpid(pid, 0)
     finally:
