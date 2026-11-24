@@ -210,6 +210,25 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(visible.status, 'error')
         self.assertIn('не вернула текста', visible.explanation)
 
+    def test_model_connection_failure_is_visible_without_leaking_server_url(self):
+        import time
+        from unittest.mock import patch
+        from urllib.error import URLError
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        app.add_block('echo hi', 'placeholder', '').finish(0)
+        with patch('terminal_ai.core.iter_explanation', side_effect=URLError('SECRET_PRIVATE_URL')):
+            app.meta('/explain')
+            visible = app.blocks[-1]
+            for _ in range(200):
+                app.poll()
+                if visible.status != 'running':
+                    break
+                time.sleep(.01)
+        self.assertEqual(visible.status, 'error')
+        self.assertIn('Нет связи', visible.explanation)
+        self.assertNotIn('SECRET_PRIVATE_URL', visible.explanation)
+
     def test_openai_compatible(self):
         model = ModelProfile('local', 'openai', self.url + '/v1', 'model-id')
         self.assertEqual(''.join(iter_explanation(model, 'ls', 'result', 0)), 'Проверка прошла')
