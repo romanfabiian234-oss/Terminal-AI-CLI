@@ -218,6 +218,10 @@ class Block:
     started: float = field(default_factory=time.monotonic)
     analysed: bool = False
     analysis_epoch: int = 0
+    ai_profile: str = ""
+    ai_model: str = ""
+    ai_state: str = ""
+    ai_seconds: float | None = None
 
     def finish(self, exit_code: int) -> None:
         self.exit_code = exit_code
@@ -254,8 +258,20 @@ def explain_rules(command: str, output: str, exit_code: int | None) -> tuple[str
     if exit_code is None:
         return "Команда выполняется", "Программа ещё работает; результат пока неизвестен."
     if exit_code != 0:
-        if "command not found" in output.lower() or "not found" in output.lower() and exit_code == 127:
-            return "Команда не найдена", "Оболочка не смогла найти программу. Проверь название или установку."
+        lower = output.lower()
+        if "command not found" in lower or ("not found" in lower and exit_code == 127):
+            return "Команда не найдена", "Команда не найдена в системе. Проверь написание или установку."
+        match = re.search(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]", output)
+        if match:
+            return "Не найден модуль Python", f"Python не нашёл модуль {match.group(1)[:90]}."
+        if "permission denied" in lower or "permissionerror:" in lower:
+            return "Недостаточно прав", "Операция отклонена из-за отсутствия необходимых прав."
+        if "filenotfounderror:" in lower or "no such file or directory" in lower:
+            return "Файл не найден", "Команда обращается к файлу или папке, которых нет по указанному пути."
+        if "syntaxerror:" in lower:
+            return "Ошибка синтаксиса", "Интерпретатор обнаружил ошибку в записи команды или кода."
+        if "not a git repository" in lower:
+            return "Нет репозитория Git", "В текущей папке Git не нашёл репозиторий."
         return "Команда завершилась с ошибкой", f"Процесс вернул код {exit_code}. Подробности находятся в техническом выводе."
     if re.search(r"(?:^|\s)(?:pytest|python\s+-m\s+pytest|npm\s+test|cargo\s+test|swift\s+test)\b", cmd):
         return "Тестирование завершилось", "Команда проверки завершилась с кодом 0. Смотри количество пройденных тестов в выводе."
@@ -383,6 +399,7 @@ class AiWorker:
             if item is None:
                 return
             block_id, epoch, profile, command, output, code, language = item
+            started = time.monotonic()
             try:
                 chunks: list[str] = []
                 for chunk in iter_explanation(profile, command, output, code, language):
@@ -398,6 +415,9 @@ class AiWorker:
                                      "Модель не вернула текста. Проверь модель и её режим ответа."))
             except Exception as exc:
                 self.events.put((block_id, epoch, "unavailable", model_error_message(exc)))
+            finally:
+                # Time spent in this worker handling the model request (not queue wait).
+                self.events.put((block_id, epoch, "timing", f"{time.monotonic() - started:.3f}"))
 
     def drain(self) -> list[tuple[int, int, str, str]]:
         result = []

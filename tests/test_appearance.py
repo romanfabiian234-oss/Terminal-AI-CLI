@@ -1,0 +1,125 @@
+"""Shell-like visual layout and transparent model response metadata."""
+from __future__ import annotations
+
+import time
+import curses
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from terminal_ai.core import Block, ScreenText, explain_rules, load_config
+from terminal_ai.ui import App
+
+
+class FakeWindow:
+    def __init__(self, height: int = 24, width: int = 100):
+        self.height, self.width = height, width
+        self.writes: list[tuple[int, int, str, int]] = []
+        self.cursor: tuple[int, int] | None = None
+
+    def getmaxyx(self):
+        return self.height, self.width
+
+    def erase(self):
+        self.writes.clear()
+
+    def addnstr(self, y, x, text, limit, attr):
+        self.writes.append((y, x, text[:limit], attr))
+
+    def move(self, y, x):
+        self.cursor = (y, x)
+
+    def refresh(self):
+        pass
+
+
+class ShellAppearance(unittest.TestCase):
+    def setUp(self):
+        cfg = load_config(Path('/tmp/terminal-ai-missing-config-7635'))
+        self.app = App(cfg)
+        self.app.hostname = 'MacBook-Air-Fabiian'
+
+    def render(self, screen):
+        with patch('terminal_ai.ui.curses.color_pair', side_effect=lambda n: n * 256):
+            self.app.render(screen)
+
+    def test_clean_start_only_real_shell_prompt(self):
+        self.app.cwd = Path.home()
+        screen = FakeWindow()
+        self.render(screen)
+        self.assertFalse(self.app.blocks)
+        self.assertEqual(screen.writes, [(0, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
+        self.assertEqual(screen.cursor, (0, len('MacBook-Air-Fabiian ~ % ')))
+
+    def test_blocks_are_inserted_above_following_prompt(self):
+        screen = FakeWindow()
+        block = self.app.add_block('echo hi', 'Заглушка', '')
+        block.output.feed(b'hi\n')
+        block.finish(0)
+        self.render(screen)
+        texts = [(y, x, s, attr) for y, x, s, attr in screen.writes]
+        self.assertFalse(any('Terminal AI CLI' in s for _, _, s, _ in texts))
+        self.assertEqual([(y, attr) for y, _, s, attr in texts if s == '✓'], [(0, 512 | curses.A_BOLD)])
+        heading = next((y, attr) for y, x, s, attr in texts if 'Команда завершилась' in s)
+        self.assertEqual(heading[0], 0)
+        self.assertEqual(heading[1], 1280 | curses.A_BOLD)
+        prompt_line = next(y for y, _, s, _ in texts if s.startswith('MacBook-Air-Fabiian '))
+        self.assertLess(prompt_line, screen.height - 2)
+        self.assertEqual(screen.cursor[0], prompt_line)
+
+    def test_model_name_and_response_time_are_visible(self):
+        screen = FakeWindow()
+        b = self.app.add_block('/explain', 'Объяснение ИИ', 'Приложение построено.')
+        b.ai_profile = 'home'
+        b.ai_model = 'qwen3.5:2b'
+        b.ai_state = 'ready'
+        b.ai_seconds = 1.234
+        self.render(screen)
+        joined = '\n'.join(s for _, _, s, _ in screen.writes)
+        self.assertIn('qwen3.5:2b (home) · ответ за 1.23 с', joined)
+
+    def test_full_height_keeps_input_visible_and_no_header(self):
+        screen = FakeWindow(12, 90)
+        b = self.app.add_block('seq 1 90', 'Выполняется команда', '')
+        b.output.feed(('\n'.join(map(str, range(90))) + '\n').encode())
+        b.expanded = True
+        self.render(screen)
+        self.assertEqual(screen.cursor[0], screen.height - 2)
+        self.assertFalse(any('Terminal AI CLI' in s for _, _, s, _ in screen.writes))
+
+
+class ModelMetadata(unittest.TestCase):
+    def test_worker_emits_real_request_duration(self):
+        cfg = load_config(Path('/tmp/terminal-ai-missing-config-7635'))
+        app = App(cfg)
+        b = app.add_block('python3 -c "print(1)"', 'OK', '')
+        b.finish(0)
+        with patch('terminal_ai.core.iter_explanation', side_effect=lambda *a: iter(['OK'])):
+            app._queue_ai(b)
+            for _ in range(150):
+                app.poll()
+                if b.ai_seconds is not None:
+                    break
+                time.sleep(.01)
+        self.assertEqual(b.ai_model, cfg.profile().model)
+        self.assertEqual(b.ai_profile, cfg.active)
+        self.assertEqual(b.ai_state, 'ready')
+        self.assertIsNotNone(b.ai_seconds)
+        self.assertGreaterEqual(b.ai_seconds, 0)
+
+    def test_specific_error_rules(self):
+        self.assertEqual(explain_rules('python -c "import abc123"',
+            "ModuleNotFoundError: No module named 'abc123'", 1),
+            ('Не найден модуль Python', 'Python не нашёл модуль abc123.'))
+        cases = [
+            ('permission denied', 'Недостаточно прав'),
+            ('FileNotFoundError: test', 'Файл не найден'),
+            ('SyntaxError: invalid syntax', 'Ошибка синтаксиса'),
+            ('fatal: not a git repository', 'Нет репозитория Git'),
+        ]
+        for output, title in cases:
+            self.assertEqual(explain_rules('dummy', output, 1)[0], title)
+
+
+if __name__ == '__main__':
+    unittest.main()
