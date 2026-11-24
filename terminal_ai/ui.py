@@ -79,6 +79,7 @@ class App:
             self.process = subprocess.Popen(
                 [self.cfg.shell, "-lc", command], stdin=slave, stdout=slave, stderr=slave,
                 cwd=self.cwd, preexec_fn=prepare_child, close_fds=True,
+                env={**os.environ, "PAGER": "cat", "GIT_PAGER": "cat"},
             )
             os.set_blocking(master, False)
             self.master = master
@@ -153,14 +154,12 @@ class App:
                 os.close(self.master)
                 self.master, self.process = None, None
                 changed = True
-            elif (self.ai_on and not self.active.analysed and
-                  time.monotonic() - self.active.started > 1.5 and
-                  len(self.active.output.excerpt()) >= 120):
-                self._queue_ai(self.active)
+            # Display running output immediately, but defer model analysis until
+            # a real exit code exists. A pager or active process is not an error.
         for event in self.worker.drain():
             block_id, epoch, phase, text = event
             b = next((item for item in self.blocks if item.id == block_id), None)
-            if not b or b.analysis_epoch != epoch:
+            if not b or b.analysis_epoch != epoch or b.status == "running":
                 continue
             if phase in ("partial", "done") and text.strip():
                 # Prevent long model text from taking over the event timeline.
@@ -174,7 +173,7 @@ class App:
         return changed
 
     def _queue_ai(self, b: Block, *, force: bool = False) -> None:
-        if not self.ai_on:
+        if not self.ai_on or b.exit_code is None:
             return
         # Deterministic explanations are faster and more reliable for basic
         # read-only shell commands. :explain still allows a manual AI request.

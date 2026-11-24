@@ -236,11 +236,15 @@ def simple_read_command(command: str) -> str | None:
         parts = shlex.split(command)
     except ValueError:
         return None
-    if parts and parts[0] in {"ls", "pwd", "whoami", "date"}:
-        # Avoid misdescribing commands which only print built-in usage/version.
-        if any(x in ("--help", "--version") for x in parts[1:]):
-            return None
+    if not parts or any(x in ("--help", "--version") for x in parts[1:]):
+        return None
+    if parts[0] in {"ls", "pwd", "whoami", "date"}:
         return parts[0]
+    git_args = parts[1:] if parts[0] == "git" else []
+    if git_args[:1] == ["--no-pager"]:
+        git_args = git_args[1:]
+    if git_args and git_args[0] in {"status", "log"}:
+        return "git " + git_args[0]
     return None
 
 
@@ -256,9 +260,13 @@ def explain_rules(command: str, output: str, exit_code: int | None) -> tuple[str
         return "Тестирование завершилось", "Команда проверки завершилась с кодом 0. Смотри количество пройденных тестов в выводе."
     if re.search(r"(?:^|\s)(?:npm\s+run\s+build|cargo\s+build|swift\s+build|xcodebuild)\b", cmd):
         return "Сборка завершилась", "Команда сборки завершилась с кодом 0."
+    simple = simple_read_command(command)
+    if simple == "git status":
+        return "Состояние Git", "Получена информация о состоянии репозитория."
+    if simple == "git log":
+        return "История коммитов", "Получена история коммитов репозитория."
     if cmd.startswith("git "):
         return "Команда Git выполнена", "Git завершил операцию без ошибки. Подробности показаны ниже."
-    simple = simple_read_command(command)
     if simple == "ls":
         return "Содержимое папки", "Получен список файлов и папок."
     if simple == "pwd":
