@@ -84,6 +84,25 @@ class PersistentPTY(unittest.TestCase):
         finally:
             app.stop()
 
+    def test_persistent_shell_disables_pagers_in_managed_blocks(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = self.shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            app.meta(':session on')
+            self.assertIsNotNone(app.session)
+            app.start('echo "PAGER=$PAGER GIT_PAGER=$GIT_PAGER"', 25, 90)
+            for _ in range(300):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(.01)
+            self.assertIsNone(app.active)
+            self.assertIn('PAGER=cat GIT_PAGER=cat', app.blocks[-1].output.excerpt())
+        finally:
+            app.stop()
+
     def test_nonzero_exit_and_shell_survives(self):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
         cfg.shell = self.shell

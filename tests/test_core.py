@@ -75,6 +75,16 @@ class RuleTests(unittest.TestCase):
     def test_rule_build(self):
         self.assertIn('Сборка', explain_rules('npm run build', 'Finished', 0)[0])
 
+    def test_git_read_only_rules_and_compound_safety(self):
+        for command, kind in (("git status", "git status"),
+                              ("git log -3 --oneline", "git log"),
+                              ("git --no-pager log -3 --oneline", "git log")):
+            self.assertEqual(simple_read_command(command), kind)
+            self.assertNotIn("ошиб", explain_rules(command, "sample", 0)[1])
+        for command in ("git status; echo x", "git log | head", "git log --help", "git commit -m x"):
+            self.assertIsNone(simple_read_command(command))
+        self.assertEqual(explain_rules("git log", "fatal error", 1)[0], "Команда завершилась с ошибкой")
+
     def test_simple_commands_do_not_need_ai(self):
         for command, title in (("ls", "Содержимое папки"), ("ls -la", "Содержимое папки"),
                                ("pwd", "Текущая папка"), ("whoami", "Текущий пользователь")):
@@ -182,15 +192,55 @@ class AppTests(unittest.TestCase):
         app._queue_ai(b)
         self.assertEqual(calls, [])
         self.assertEqual(b.title, 'Содержимое папки')
-        running = app.add_block('ls', 'temporary', '')
+        running = app.add_block('ls', 'temporary', '', 'running')
         app._queue_ai(running)
         self.assertEqual(calls, [])
+        app.meta(':explain')  # A still-running command cannot be analyzed as finished.
+        self.assertEqual(calls, [])
+        self.assertEqual(app.blocks[-1].status, 'error')
+        app.blocks.pop()  # Remove the explanatory error block before another test.
+        running.finish(0)
         app.meta(':explain')
         self.assertEqual(calls, ['ls'])
         b2 = app.add_block('ls', 'temporary', '')
         b2.finish(2)
         app._queue_ai(b2)
         self.assertEqual(calls, ['ls', 'ls'])
+
+    def test_do_not_run_ai_or_apply_updates_while_process_is_running(self):
+        import shutil
+        import time
+        shell = shutil.which('bash') or shutil.which('zsh')
+        if not shell:
+            self.skipTest('shell unavailable')
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = shell
+        app = App(cfg)
+        submitted = []
+        app.worker.submit = lambda block: submitted.append(block.id) or True
+        try:
+            app.start('sleep 0.35', 25, 90)
+            b = app.active
+            b.output.feed(b'progress ' * 25)
+            b.started -= 5  # Force the old 1.5s heuristic to run.
+            app.poll()
+            self.assertEqual(submitted, [])
+            self.assertEqual(b.status, 'running')
+            self.assertIn('ещё работает', b.explanation)
+            # Delayed model results must not turn an active command into a false error.
+            app.worker.events.put((b.id, b.analysis_epoch, 'done', 'Команда завершилась с ошибкой still running'))
+            app.poll()
+            self.assertIn('ещё работает', b.explanation)
+            for _ in range(150):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(.01)
+            self.assertIsNone(app.active)
+            self.assertEqual(b.exit_code, 0)
+            self.assertEqual(submitted, [b.id])
+        finally:
+            app.stop()
 
     def test_cd_and_unknown_model(self):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
@@ -318,6 +368,43 @@ class PTYTests(unittest.TestCase):
             self.assertFalse(app.direct_input)
         finally:
             app.stop()
+
+    def test_git_log_no_interactive_pager(self):
+        import shutil
+        import subprocess
+        import tempfile
+        import time
+        from unittest.mock import patch
+        shell = shutil.which('bash') or shutil.which('zsh')
+        git = shutil.which('git')
+        if not shell or not git:
+            self.skipTest('shell or git unavailable')
+        with tempfile.TemporaryDirectory() as tmp:
+            subprocess.run([git, 'init', '-q', tmp], check=True)
+            subprocess.run([git, '-C', tmp, '-c', 'user.name=Test',
+                            '-c', 'user.email=local@example.org', '-c', 'commit.gpgsign=false',
+                            'commit', '--quiet', '--allow-empty', '-m', 'PAGER_TEST'], check=True)
+            cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+            cfg.shell = shell
+            app = App(cfg)
+            app.cwd = Path(tmp)
+            app.ai_on = False
+            try:
+                with patch.dict(os.environ, {'GIT_PAGER': 'less', 'PAGER': 'less'}):
+                    app.start('printf "PAGER=%s GIT_PAGER=%s\n" "$PAGER" "$GIT_PAGER"; git log -3 --oneline', 25, 90)
+                for _ in range(300):
+                    app.poll()
+                    if app.active is None:
+                        break
+                    time.sleep(.01)
+                self.assertIsNone(app.active, 'Git log was stuck in an interactive pager')
+                b = app.blocks[-1]
+                self.assertEqual(b.exit_code, 0)
+                self.assertIn('PAGER=cat GIT_PAGER=cat', b.output.excerpt())
+                self.assertIn('PAGER_TEST', b.output.excerpt())
+                self.assertNotIn('(END)', b.output.excerpt())
+            finally:
+                app.stop()
 
     def test_nonzero_exit_status(self):
         import shutil

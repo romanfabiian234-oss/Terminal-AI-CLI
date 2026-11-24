@@ -85,7 +85,9 @@ class PersistentShell:
         self.token = secrets.token_hex(12)
         self.parser = MarkerStripper(self.token)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", max(rows, 3), max(cols, 20), 0, 0))
-        env = dict(os.environ, TAI_SESSION_TOKEN=self.token)
+        # Managed block mode captures complete output; interactive pagers belong
+        # in :raw, where users can see and control their full-screen interface.
+        env = dict(os.environ, TAI_SESSION_TOKEN=self.token, PAGER="cat", GIT_PAGER="cat")
 
         def prepare() -> None:
             os.setsid()
