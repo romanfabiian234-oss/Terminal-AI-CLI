@@ -43,6 +43,21 @@ def configure_colors(background: int) -> None:
     curses.init_pair(5, heading_green, background)
 
 
+def enable_mouse_wheel() -> None:
+    """Request wheel events without capturing clicks or dragging when supported.
+
+    macOS Terminal may instead navigate its own scrollback; its profile's
+    `Scroll alternate screen` setting controls that native behavior.
+    """
+    try:
+        curses.mouseinterval(0)
+        wheel = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON5_PRESSED", 0)
+        if wheel:
+            curses.mousemask(wheel)
+    except (curses.error, AttributeError):
+        pass
+
+
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
                             "server", "ai", "explain", "language", "expand", "clear", "raw"})
 
@@ -337,6 +352,16 @@ class App:
 
     def key(self, key: str | int, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
+        if key == curses.KEY_MOUSE:
+            try:
+                _, _, _, _, buttons = curses.getmouse()
+                if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
+                    self.scroll += 3
+                if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
+                    self.scroll = max(0, self.scroll - 3)
+            except curses.error:
+                pass
+            return
         if key == curses.KEY_RESIZE:
             self.resize(rows, cols)
             return
@@ -599,7 +624,8 @@ def run_ui(config: Config) -> None:
         except curses.error:
             bg = curses.COLOR_BLACK
         configure_colors(bg)
-        enter_app_screen()  # Do not expose original shell scrollback inside TUI.
+        enter_app_screen()  # Keep main shell scrollback separate, not erased.
+        enable_mouse_wheel()
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(65)
@@ -618,6 +644,11 @@ def run_ui(config: Config) -> None:
                     if command:
                         from .raw import run_raw_command
                         b = app.add_block(command, "Интерактивная программа", "Открыта в полном терминале.", "running")
+                        # Let full-screen children manage their own mouse input.
+                        try:
+                            curses.mousemask(0)
+                        except curses.error:
+                            pass
                         curses.endwin()
                         # endwin() can return to the original shell buffer.
                         enter_app_screen()
@@ -639,11 +670,16 @@ def run_ui(config: Config) -> None:
                             # Restore the private screen before curses redraws.
                             enter_app_screen()
                             curses.reset_prog_mode()
+                            enable_mouse_wheel()
                             stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
                 app.render(stdscr)
         finally:
+            try:
+                curses.mousemask(0)
+            except curses.error:
+                pass
             app.stop()
 
     curses.wrapper(main)
