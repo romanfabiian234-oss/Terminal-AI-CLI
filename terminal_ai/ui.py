@@ -23,7 +23,7 @@ from .session import PersistentShell
 
 # The xterm alternate screen separates the TUI from regular shell scrollback.
 # Re-enter after curses.endwin() or a fullscreen child switches buffers.
-_ALT_SCREEN_ON = b"\\x1b[?1049h"
+_ALT_SCREEN_ON = b"\x1b[?1049h"
 
 
 def enter_app_screen() -> None:
