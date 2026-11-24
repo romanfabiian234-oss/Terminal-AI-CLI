@@ -168,6 +168,10 @@ class AppTests(unittest.TestCase):
         self.assertEqual(app.blocks[-1].status, 'error')
         app.meta(':models')
         self.assertIn('local', app.blocks[-1].explanation)
+        app.meta(':language uk')
+        self.assertEqual(cfg.language, 'uk')
+        app.meta(':server local')
+        self.assertEqual(cfg.active, 'local')
 
 
 if __name__ == '__main__':

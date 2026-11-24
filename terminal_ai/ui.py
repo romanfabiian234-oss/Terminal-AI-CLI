@@ -104,6 +104,7 @@ class App:
                         break
                 block = self.active
                 block.finish(self.process.returncode)
+                block.analysis_epoch += 1  # Reject unfinished summaries from earlier live snapshots.
                 self._queue_ai(block)
                 os.close(self.master)
                 self.master, self.process, self.active = None, None, None
@@ -224,11 +225,11 @@ class App:
         if name in (":quit", ":exit"):
             self.should_exit = True
         elif name == ":help":
-            self.add_block(command, "Команды приложения", ":models · :model NAME · :ai on/off · :expand · :clear · :exit · :raw COMMAND (выполняется отдельно от ленты)")
+            self.add_block(command, "Команды приложения", ":models · :model NAME · :server NAME · :language ru/uk/en · :explain · :ai on/off · :expand · :clear · :exit · :raw COMMAND")
         elif name == ":models":
             names = ", ".join(f"{n} ({p.provider}: {p.model})" for n, p in self.cfg.profiles.items())
             self.add_block(command, "Доступные модели", names)
-        elif name == ":model" and len(parts) == 2:
+        elif name in (":model", ":server") and len(parts) == 2:
             if parts[1] in self.cfg.profiles:
                 self.cfg.active = parts[1]
                 self.add_block(command, "Модель переключена", f"Профиль: {parts[1]}")
@@ -237,6 +238,17 @@ class App:
         elif name == ":ai" and len(parts) == 2 and parts[1] in ("on", "off"):
             self.ai_on = parts[1] == "on"
             self.add_block(command, "Режим анализа", "ИИ включён" if self.ai_on else "ИИ отключён. Работают только правила.")
+        elif name == ":explain":
+            if self.blocks and self.blocks[-1].status != "running":
+                self._queue_ai(self.blocks[-1])
+            else:
+                self.add_block(command, "Нет завершённой команды", "После завершения команды повтори :explain.", "error")
+        elif name == ":language" and len(parts) == 2:
+            if parts[1] in ("ru", "uk", "en"):
+                self.cfg.language = parts[1]
+                self.add_block(command, "Язык объяснений изменён", parts[1])
+            else:
+                self.add_block(command, "Неизвестный язык", "Доступно: ru, uk, en", "error")
         elif name == ":expand":
             if self.blocks:
                 self.blocks[-1].expanded = not self.blocks[-1].expanded
