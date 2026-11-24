@@ -33,6 +33,7 @@ def is_meta_command(command: str) -> bool:
     name = parts[0]
     return name.startswith(":") or (name.startswith("/") and name[1:] in SLASH_COMMANDS)
 
+
 # Full-screen programs must control the terminal directly.  Treat only a
 # standalone invocation as interactive: pipelines and compound commands keep
 # their normal shell behavior, and `codex exec` remains non-interactive.
