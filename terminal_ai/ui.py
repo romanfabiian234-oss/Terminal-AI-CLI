@@ -17,6 +17,7 @@ from collections import deque
 from pathlib import Path
 
 from .core import AiWorker, Block, Config, ScreenText, explain_rules
+from .session import PersistentShell
 
 
 class App:
@@ -32,6 +33,8 @@ class App:
         self.scroll = 0
         self.ai_on = True
         self.ai_state = "local / idle"
+        self.session: PersistentShell | None = None
+        self.last_rows, self.last_cols = 24, 80
         self.process: subprocess.Popen[bytes] | None = None
         self.master: int | None = None
         self.active: Block | None = None
@@ -54,6 +57,14 @@ class App:
         self.blocks.append(b)
         self.active = b
         self.scroll = 0
+        if self.session is not None:
+            try:
+                self.session.send(command)
+            except (OSError, ValueError) as exc:
+                b.finish(127)
+                b.explanation = f"Ошибка постоянной сессии: {exc}"
+                self.active = None
+            return
         master, slave = pty.openpty()
         winsz = struct.pack("HHHH", max(3, rows - 3), max(20, cols), 0, 0)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, winsz)
@@ -77,8 +88,41 @@ class App:
         finally:
             os.close(slave)
 
+    def _finish(self, exit_code: int) -> None:
+        if not self.active:
+            return
+        block = self.active
+        if self.session is not None and block.output.lines:
+            # Interactive shells echo our command. Keep the source below the
+            # explanation without duplicating the input line.
+            first = block.output.lines[0].strip()
+            if first == block.command.strip():
+                block.output.lines.popleft()
+        block.finish(exit_code)
+        block.analysis_epoch += 1  # Cancel pending incomplete explanations.
+        self._queue_ai(block)
+        self.active = None
+
     def poll(self) -> bool:
         changed = False
+        if self.session is not None:
+            for event, value in self.session.poll():
+                if event == "output":
+                    if self.active:
+                        self.active.output.feed(value)
+                        changed = True
+                elif event == "end":
+                    exit_code, cwd = value
+                    if cwd and Path(cwd).is_dir():
+                        self.cwd = Path(cwd)
+                    self._finish(exit_code)
+                    changed = True
+                elif event == "session_exited":
+                    self._finish(value if isinstance(value, int) else 127)
+                    self.session.stop()
+                    self.session = None
+                    self.add_block("", "Сессия завершилась", "Для повторного запуска введи :session on.", "error")
+                    changed = True
         if self.master is not None and self.active:
             for _ in range(12):
                 try:
@@ -102,12 +146,9 @@ class App:
                         changed = True
                     except (BlockingIOError, OSError):
                         break
-                block = self.active
-                block.finish(self.process.returncode)
-                block.analysis_epoch += 1  # Reject unfinished summaries from earlier live snapshots.
-                self._queue_ai(block)
+                self._finish(self.process.returncode)
                 os.close(self.master)
-                self.master, self.process, self.active = None, None, None
+                self.master, self.process = None, None
                 changed = True
             elif (self.ai_on and not self.active.analysed and
                   time.monotonic() - self.active.started > 1.5 and
@@ -134,6 +175,9 @@ class App:
             self.ai_state = "thinking"
 
     def resize(self, rows: int, cols: int) -> None:
+        self.last_rows, self.last_cols = rows, cols
+        if self.session is not None:
+            self.session.resize(rows - 3, cols)
         if self.master is not None:
             try:
                 fcntl.ioctl(self.master, termios.TIOCSWINSZ, struct.pack("HHHH", max(3, rows - 3), max(20, cols), 0, 0))
@@ -143,6 +187,12 @@ class App:
                 pass
 
     def _send(self, data: bytes) -> None:
+        if self.session is not None:
+            try:
+                self.session.send_raw(data)
+            except OSError:
+                pass
+            return
         if self.master is not None:
             try:
                 os.write(self.master, data)
@@ -150,6 +200,7 @@ class App:
                 pass
 
     def key(self, key: str | int, rows: int, cols: int) -> None:
+        self.last_rows, self.last_cols = rows, cols
         if key == curses.KEY_RESIZE:
             self.resize(rows, cols)
             return
@@ -170,7 +221,12 @@ class App:
             return
         if self.active:
             if key == "\x03":
-                if self.process:
+                if self.session is not None:
+                    try:
+                        self.session.interrupt()
+                    except OSError:
+                        pass
+                elif self.process:
                     try:
                         os.killpg(self.process.pid, signal.SIGINT)
                     except ProcessLookupError:
@@ -191,7 +247,7 @@ class App:
             self.hist_pos = len(self.history)
             if command.startswith(":"):
                 self.meta(command)
-            elif command == "cd" or command.startswith("cd "):
+            elif self.session is None and (command == "cd" or command.startswith("cd ")):
                 try:
                     args = shlex.split(command)
                     dest = Path(os.path.expandvars(os.path.expanduser(args[1] if len(args) > 1 else "~")))
@@ -225,7 +281,20 @@ class App:
         if name in (":quit", ":exit"):
             self.should_exit = True
         elif name == ":help":
-            self.add_block(command, "Команды приложения", ":models · :model NAME · :server NAME · :language ru/uk/en · :explain · :ai on/off · :expand · :clear · :exit · :raw COMMAND")
+            self.add_block(command, "Команды приложения", ":session on/off · :models · :model NAME · :server NAME · :language ru/uk/en · :explain · :ai on/off · :expand · :clear · :exit · :raw COMMAND")
+        elif name == ":session" and len(parts) == 2 and parts[1] in ("on", "off"):
+            if parts[1] == "on" and self.session is None:
+                try:
+                    self.session = PersistentShell(self.cfg.shell, self.cwd, self.last_rows - 3, self.last_cols)
+                    self.add_block(command, "Постоянная сессия включена", "Переменные, функции, алиасы и папка сохраняются между командами. Однострочный ввод. Экспериментальный режим.")
+                except (OSError, ValueError) as exc:
+                    self.add_block(command, "Не удалось открыть сессию", str(exc), "error")
+            elif parts[1] == "off" and self.session is not None:
+                self.session.stop()
+                self.session = None
+                self.add_block(command, "Постоянная сессия выключена", "Обычные команды снова выполняются отдельно.")
+            else:
+                self.add_block(command, "Режим сессии", "Уже включён" if self.session else "Уже выключен")
         elif name == ":models":
             names = ", ".join(f"{n} ({p.provider}: {p.model})" for n, p in self.cfg.profiles.items())
             self.add_block(command, "Доступные модели", names)
@@ -302,7 +371,8 @@ class App:
         else:
             prompt += self.line
         self._line(stdscr, h - 2, 0, prompt, curses.color_pair(1))
-        status = f" {self.cfg.active} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+T: детали  PgUp/PgDn: история  :help "
+        mode = "session" if self.session is not None else "isolated"
+        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+T: детали  PgUp/PgDn: история  :help "
         self._line(stdscr, h - 1, 0, status, curses.color_pair(4))
         if self.active is None:
             cursor_x = min(w - 2, len(f"❯ {self.cwd.name or '/'} % ") + len(self.line))
@@ -332,6 +402,9 @@ class App:
         return result[:35]
 
     def stop(self) -> None:
+        if self.session is not None:
+            self.session.stop()
+            self.session = None
         if self.process and self.process.poll() is None:
             try:
                 os.killpg(self.process.pid, signal.SIGTERM)
