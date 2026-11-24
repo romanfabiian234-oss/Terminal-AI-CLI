@@ -4,6 +4,7 @@ from __future__ import annotations
 import codecs
 import json
 import os
+import socket
 import re
 import shlex
 import ssl
@@ -17,7 +18,7 @@ import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from typing import Iterator
 
 DEFAULT_CONFIG = Path.home() / ".config" / "terminal-ai" / "config.toml"
@@ -339,6 +340,21 @@ def iter_explanation(profile: ModelProfile, command: str, output: str, exit_code
                 break
 
 
+def model_error_message(exc: Exception) -> str:
+    """Safe, actionable error for the UI; never include URL, tokens or response body."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code == 404:
+            return "Модель или адрес API не найдены (HTTP 404). Проверь /models и сервер."
+        if exc.code in (401, 403):
+            return "Нет доступа к API модели. Проверь ключ и настройки сервера."
+        return f"Сервер модели вернул HTTP {exc.code}. Проверь его состояние."
+    if isinstance(exc, (TimeoutError, socket.timeout)):
+        return "Модель не ответила вовремя. Проверь сервер и попробуй ещё раз."
+    if isinstance(exc, (ConnectionError, urllib.error.URLError, OSError)):
+        return "Нет связи с сервером модели. Проверь Ollama или выбранный адрес."
+    return "Не удалось получить ответ модели. Проверь профиль и журнал сервера."
+
+
 class AiWorker:
     """Single worker; UI keeps running independently of slow or offline servers."""
     def __init__(self, config: Config):
@@ -348,15 +364,18 @@ class AiWorker:
         self.thread = threading.Thread(target=self._work, name="terminal-ai-model", daemon=True)
         self.thread.start()
 
-    def submit(self, block: Block) -> bool:
+    def submit(self, block: Block, *, source: Block | None = None) -> bool:
+        """Route model output to block; optionally explain a different source block."""
         epoch = block.analysis_epoch + 1
-        item = (block.id, epoch, self.config.profile(), block.command, block.output.excerpt(), block.exit_code, self.config.language)
+        origin = source if source is not None else block
+        item = (block.id, epoch, self.config.profile(), origin.command,
+                origin.output.excerpt(), origin.exit_code, self.config.language)
         try:
             self.requests.put_nowait(item)
-            block.analysis_epoch = epoch
-            return True
-        except Exception:
+        except Full:
             return False
+        block.analysis_epoch = epoch
+        return True
 
     def _work(self) -> None:
         while True:
@@ -371,9 +390,14 @@ class AiWorker:
                     if len("".join(chunks)) > 600:
                         break
                     self.events.put((block_id, epoch, "partial", "".join(chunks)))
-                self.events.put((block_id, epoch, "done", "".join(chunks).strip()))
-            except Exception:
-                self.events.put((block_id, epoch, "unavailable", ""))
+                result = "".join(chunks).strip()
+                if result:
+                    self.events.put((block_id, epoch, "done", result))
+                else:
+                    self.events.put((block_id, epoch, "unavailable",
+                                     "Модель не вернула текста. Проверь модель и её режим ответа."))
+            except Exception as exc:
+                self.events.put((block_id, epoch, "unavailable", model_error_message(exc)))
 
     def drain(self) -> list[tuple[int, int, str, str]]:
         result = []
