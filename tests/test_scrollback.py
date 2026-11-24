@@ -53,7 +53,7 @@ class TerminalWindow(FakeWindow):
 
 
 class RawLifecycle(unittest.TestCase):
-    def test_reenter_screen_before_and_after_codex(self):
+    def test_one_fullscreen_handoff_without_nested_screen_switches(self):
         cfg = load_config(Path('/tmp/terminal-ai-unknown-screen-config-811'))
         cfg.shell = shutil.which('bash') or cfg.shell
         screen = TerminalWindow('codex\n/exit\n')
@@ -75,7 +75,7 @@ class RawLifecycle(unittest.TestCase):
              patch.object(curses, 'COLORS', 256, create=True), \
              patch('terminal_ai.raw.run_raw_command', side_effect=run_mock):
             run_ui(cfg)
-        self.assertEqual(calls, ['private', 'endwin', 'private', 'child', 'private', 'resume'])
+        self.assertEqual(calls, ['endwin', 'child', 'resume'])
 
 
 if __name__ == '__main__':
