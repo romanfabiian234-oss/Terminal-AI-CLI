@@ -175,6 +175,41 @@ class ModelTests(unittest.TestCase):
             redirector.server_close()
             other.server_close()
 
+    def test_explain_actual_mock_server_stream(self):
+        import time
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.profiles['local'] = ModelProfile('local', 'ollama', self.url, 'tiny')
+        app = App(cfg)
+        command = app.add_block('echo alive', 'done', '')
+        command.finish(0)
+        app.meta('/explain')
+        visible = app.blocks[-1]
+        for _ in range(200):
+            app.poll()
+            if visible.status != 'running':
+                break
+            time.sleep(0.01)
+        self.assertEqual(visible.status, 'ok')
+        self.assertEqual(visible.explanation, 'Готово')
+        self.assertEqual(self.requests[-1][1]['messages'][1]['content'].splitlines()[0], 'Command: echo alive')
+
+    def test_empty_response_is_visible_error(self):
+        import time
+        from unittest.mock import patch
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        app.add_block('echo hi', 'placeholder', '').finish(0)
+        with patch('terminal_ai.core.iter_explanation', return_value=iter(())):
+            app.meta('/explain')
+            visible = app.blocks[-1]
+            for _ in range(200):
+                app.poll()
+                if visible.status != 'running':
+                    break
+                time.sleep(.01)
+        self.assertEqual(visible.status, 'error')
+        self.assertIn('не вернула текста', visible.explanation)
+
     def test_openai_compatible(self):
         model = ModelProfile('local', 'openai', self.url + '/v1', 'model-id')
         self.assertEqual(''.join(iter_explanation(model, 'ls', 'result', 0)), 'Проверка прошла')
@@ -186,26 +221,84 @@ class AppTests(unittest.TestCase):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
         app = App(cfg)
         calls = []
-        app.worker.submit = lambda block: calls.append(block.command) or True
+        app.worker.submit = lambda block, **kwargs: calls.append((block.command, kwargs.get('source'))) or True
         b = app.add_block('ls', 'temporary', '')
         b.finish(0)
         app._queue_ai(b)
         self.assertEqual(calls, [])
         self.assertEqual(b.title, 'Содержимое папки')
-        running = app.add_block('ls', 'temporary', '', 'running')
-        app._queue_ai(running)
-        self.assertEqual(calls, [])
-        app.meta(':explain')  # A still-running command cannot be analyzed as finished.
-        self.assertEqual(calls, [])
+        app.meta('/explain')
+        self.assertEqual(app.blocks[-1].status, 'running')
+        self.assertEqual(calls[0], ('/explain', b))
+        error = app.add_block('ls', 'temporary', '')
+        error.finish(2)
+        app._queue_ai(error)
+        self.assertEqual(len(calls), 2)
+
+    def test_slash_commands_and_legacy_alias_and_absolute_paths(self):
+        from terminal_ai.ui import is_meta_command
+        for command in ('/models', '/model local', '/session on', '/help', ':models', ':explain'):
+            self.assertTrue(is_meta_command(command))
+        for command in ('/bin/echo hello', '/tmp/run-script', '/not-a-meta-command', 'git status'):
+            self.assertFalse(is_meta_command(command))
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        app.meta('/models')
+        self.assertIn('local', app.blocks[-1].explanation)
+        app.meta('/help')
+        self.assertIn('/explain', app.blocks[-1].explanation)
+        app.meta(':help')
+        self.assertIn('/models', app.blocks[-1].explanation)
+        app.meta('/raw codex')
+        self.assertEqual(app.raw_command, 'codex')
+        app.meta(':raw vim')
+        self.assertEqual(app.raw_command, 'vim')
+
+    def test_explain_handles_no_command_and_disabled_ai(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        app.meta('/explain')
         self.assertEqual(app.blocks[-1].status, 'error')
-        app.blocks.pop()  # Remove the explanatory error block before another test.
-        running.finish(0)
+        self.assertEqual(app.blocks[-1].status, 'error')
+        self.assertIn('Сначала', app.blocks[-1].explanation)
+        b = app.add_block('git status', 'placeholder', '')
+        b.finish(0)
+        app.meta('/ai off')
+        app.meta('/explain')
+        self.assertEqual(app.blocks[-1].status, 'error')
+        self.assertIn('/ai on', app.blocks[-1].explanation)
+
+    def test_explain_stream_result_and_failure_stay_visible(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        def fake_submit(target, *, source=None):
+            target.analysis_epoch += 1
+            app.last_source = source
+            return True
+        app.worker.submit = fake_submit
+        original = app.add_block('git log -3 --oneline', 'History', '')
+        original.output.feed(b'abc commit text\n')
+        original.finish(0)
+        app.meta('/models')  # Explain should skip meta records.
+        app.meta('/explain')
+        target = app.blocks[-1]
+        self.assertEqual(target.status, 'running')
+        self.assertIs(app.last_source, original)
+        app.worker.events.put((target.id, target.analysis_epoch, 'partial', 'Найдено три'))
+        app.poll()
+        self.assertEqual(target.status, 'running')
+        self.assertEqual(target.explanation, 'Найдено три')
+        app.worker.events.put((target.id, target.analysis_epoch, 'done', 'Показаны три коммита.'))
+        app.poll()
+        self.assertEqual(target.status, 'ok')
+        self.assertEqual(target.explanation, 'Показаны три коммита.')
+        self.assertEqual(original.title, 'История коммитов')
         app.meta(':explain')
-        self.assertEqual(calls, ['ls'])
-        b2 = app.add_block('ls', 'temporary', '')
-        b2.finish(2)
-        app._queue_ai(b2)
-        self.assertEqual(calls, ['ls', 'ls'])
+        error = app.blocks[-1]
+        app.worker.events.put((error.id, error.analysis_epoch, 'unavailable', 'Нет связи с сервером модели.'))
+        app.poll()
+        self.assertEqual(error.status, 'error')
+        self.assertIn('Нет связи', error.explanation)
 
     def test_do_not_run_ai_or_apply_updates_while_process_is_running(self):
         import shutil
