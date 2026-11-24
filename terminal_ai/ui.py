@@ -92,6 +92,26 @@ def needs_fullscreen(command: str) -> bool:
         return parts[1].startswith("-") and parts[1] not in {"-h", "--help", "-V", "--version"}
     return executable in {"vim", "nvim", "nano", "htop", "btop"}
 
+def fullscreen_launch_command(command: str) -> str:
+    """Ask interactive Codex to use its own alternate buffer in this session.
+
+    Do not rewrite shell expressions or explicit user choices; unlike an edit to
+    ~/.codex/config.toml this only affects one interactive launch.
+    """
+    if not needs_fullscreen(command):
+        return command
+    if any(x in command for x in ("$", "`", "\\", "*", "?", "\n", "\r")):
+        return command
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return command
+    if Path(args[0]).name != "codex":
+        return command
+    if "--no-alt-screen" in args or any("tui.alternate_screen" in arg for arg in args):
+        return command
+    return shlex.join([args[0], "-c", 'tui.alternate_screen="always"', *args[1:]])
+
 
 class App:
     def __init__(self, cfg: Config):
@@ -624,7 +644,8 @@ def run_ui(config: Config) -> None:
         except curses.error:
             bg = curses.COLOR_BLACK
         configure_colors(bg)
-        enter_app_screen()  # Keep main shell scrollback separate, not erased.
+        # curses.wrapper has already entered the alternate screen. Do not
+        # manually re-enter it; xterm screen switching is not nestable.
         enable_mouse_wheel()
         curses.curs_set(1)
         stdscr.keypad(True)
@@ -649,11 +670,10 @@ def run_ui(config: Config) -> None:
                             curses.mousemask(0)
                         except curses.error:
                             pass
-                        curses.endwin()
-                        # endwin() can return to the original shell buffer.
-                        enter_app_screen()
+                        curses.endwin()  # Give the child the real terminal.
                         try:
-                            code, _ = run_raw_command(config.shell, command, app.cwd, config.max_output_lines)
+                            child_command = fullscreen_launch_command(command)
+                            code, _ = run_raw_command(config.shell, child_command, app.cwd, config.max_output_lines)
                             # A full-screen TUI has redraws, not a meaningful text
                             # transcript. Never paste those frames into a block
                             # or send them to a model as command output.
@@ -666,9 +686,8 @@ def run_ui(config: Config) -> None:
                             b.status = "error"
                             b.title, b.explanation = "Не удалось открыть программу", str(exc)
                         finally:
-                            # Interactive programs may exit the alternate buffer.
-                            # Restore the private screen before curses redraws.
-                            enter_app_screen()
+                            # Restore curses exactly once. Nested ?1049h/l
+                            # switches previously leaked the main scrollback.
                             curses.reset_prog_mode()
                             enable_mouse_wheel()
                             stdscr.clear()
