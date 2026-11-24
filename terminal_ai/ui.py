@@ -20,6 +20,19 @@ from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_rea
 from .session import PersistentShell
 
 
+SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
+                            "server", "ai", "explain", "language", "expand", "clear", "raw"})
+
+
+def is_meta_command(command: str) -> bool:
+    """Keep absolute executables like /bin/echo working normally."""
+    parts = command.split(maxsplit=1)
+    if not parts:
+        return False
+    name = parts[0]
+    return name.startswith(":") or (name.startswith("/") and name[1:] in SLASH_COMMANDS)
+
+
 class App:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -125,7 +138,7 @@ class App:
                     self._finish(value if isinstance(value, int) else 127)
                     self.session.stop()
                     self.session = None
-                    self.add_block("", "Сессия завершилась", "Для повторного запуска введи :session on.", "error")
+                    self.add_block("", "Сессия завершилась", "Для повторного запуска введи /session on.", "error")
                     changed = True
         if self.master is not None and self.active:
             for _ in range(12):
@@ -159,14 +172,23 @@ class App:
         for event in self.worker.drain():
             block_id, epoch, phase, text = event
             b = next((item for item in self.blocks if item.id == block_id), None)
-            if not b or b.analysis_epoch != epoch or b.status == "running":
+            if not b or b.analysis_epoch != epoch:
+                continue
+            manual = b.command in ("/explain", ":explain")
+            if b.status == "running" and not manual:
                 continue
             if phase in ("partial", "done") and text.strip():
-                # Prevent long model text from taking over the event timeline.
                 b.explanation = text.strip().replace("\n", " ")[:220]
+                if manual:
+                    b.title = "Объяснение ИИ" if phase == "done" else "ИИ отвечает"
+                    b.status = "ok" if phase == "done" else "running"
                 self.ai_state = "streaming" if phase == "partial" else "ready"
             elif phase == "unavailable":
-                self.ai_state = "offline / rules active"
+                if manual:
+                    b.status = "error"
+                    b.title = "ИИ не ответил"
+                    b.explanation = text or "Не удалось получить ответ модели."
+                self.ai_state = "model unavailable / rules active"
             changed = True
         if self._run_pending():
             changed = True
@@ -175,8 +197,8 @@ class App:
     def _queue_ai(self, b: Block, *, force: bool = False) -> None:
         if not self.ai_on or b.exit_code is None:
             return
-        # Deterministic explanations are faster and more reliable for basic
-        # read-only shell commands. :explain still allows a manual AI request.
+        # Deterministic explanations are faster for common read-only commands;
+        # /explain still allows an explicit model request.
         if not force and b.exit_code in (None, 0) and simple_read_command(b.command):
             self.ai_state = "ready / rules"
             return
@@ -215,9 +237,9 @@ class App:
         while not self.active and self.pending and not self.should_exit:
             command = self.pending.popleft()
             changed = True
-            if command.startswith(":"):
+            if is_meta_command(command):
                 self.meta(command)
-                # :raw needs to run in the main loop with curses suspended.
+                # /raw needs to run in the main loop with curses suspended.
                 if getattr(self, "raw_command", ""):
                     break
             elif self.session is None and (command == "cd" or command.startswith("cd ")):
@@ -310,12 +332,12 @@ class App:
 
     def meta(self, command: str) -> None:
         parts = command.split()
-        name = parts[0]
-        if name in (":quit", ":exit"):
+        name = "/" + parts[0][1:]
+        if name in ("/quit", "/exit"):
             self.should_exit = True
-        elif name == ":help":
-            self.add_block(command, "Команды приложения", ":session on/off · :models · :model NAME · :server NAME · :language ru/uk/en · :explain · :ai on/off · :expand · :clear · :exit · :raw COMMAND")
-        elif name == ":session" and len(parts) == 2 and parts[1] in ("on", "off"):
+        elif name == "/help":
+            self.add_block(command, "Команды приложения", "/session on/off · /models · /model NAME · /server NAME · /language ru/uk/en · /explain · /ai on/off · /expand · /clear · /exit · /raw COMMAND")
+        elif name == "/session" and len(parts) == 2 and parts[1] in ("on", "off"):
             if parts[1] == "on" and self.session is None:
                 try:
                     self.session = PersistentShell(self.cfg.shell, self.cwd, self.last_rows - 3, self.last_cols)
@@ -328,40 +350,54 @@ class App:
                 self.add_block(command, "Постоянная сессия выключена", "Обычные команды снова выполняются отдельно.")
             else:
                 self.add_block(command, "Режим сессии", "Уже включён" if self.session else "Уже выключен")
-        elif name == ":models":
+        elif name == "/models":
             names = ", ".join(f"{n} ({p.provider}: {p.model})" for n, p in self.cfg.profiles.items())
             self.add_block(command, "Доступные модели", names)
-        elif name in (":model", ":server") and len(parts) == 2:
+        elif name in ("/model", "/server") and len(parts) == 2:
             if parts[1] in self.cfg.profiles:
                 self.cfg.active = parts[1]
                 self.add_block(command, "Модель переключена", f"Профиль: {parts[1]}")
             else:
-                self.add_block(command, "Неизвестная модель", "Используй :models", "error")
-        elif name == ":ai" and len(parts) == 2 and parts[1] in ("on", "off"):
+                self.add_block(command, "Неизвестная модель", "Используй /models", "error")
+        elif name == "/ai" and len(parts) == 2 and parts[1] in ("on", "off"):
             self.ai_on = parts[1] == "on"
             self.add_block(command, "Режим анализа", "ИИ включён" if self.ai_on else "ИИ отключён. Работают только правила.")
-        elif name == ":explain":
-            if self.blocks and self.blocks[-1].status != "running":
-                self._queue_ai(self.blocks[-1], force=True)
+        elif name == "/explain":
+            source = next((b for b in reversed(self.blocks)
+                           if b.exit_code is not None and b.command
+                           and not is_meta_command(b.command)), None)
+            if not self.ai_on:
+                self.add_block(command, "ИИ выключен", "Включи его командой /ai on.", "error")
+            elif source is None:
+                self.add_block(command, "Нет выполненной команды", "Сначала выполни команду терминала.", "error")
             else:
-                self.add_block(command, "Нет завершённой команды", "После завершения команды повтори :explain.", "error")
-        elif name == ":language" and len(parts) == 2:
+                # A separate visible block prevents an invisible update of a
+                # historical item and keeps the original output untouched.
+                request = self.add_block("/explain", "ИИ анализирует",
+                                         f"Проверяю команду: {source.command[:120]}", "running")
+                if self.worker.submit(request, source=source):
+                    self.ai_state = "thinking"
+                else:
+                    request.title = "ИИ занят"
+                    request.explanation = "Очередь модели заполнена. Попробуй /explain ещё раз."
+                    request.status = "error"
+        elif name == "/language" and len(parts) == 2:
             if parts[1] in ("ru", "uk", "en"):
                 self.cfg.language = parts[1]
                 self.add_block(command, "Язык объяснений изменён", parts[1])
             else:
                 self.add_block(command, "Неизвестный язык", "Доступно: ru, uk, en", "error")
-        elif name == ":expand":
+        elif name == "/expand":
             if self.blocks:
                 self.blocks[-1].expanded = not self.blocks[-1].expanded
-        elif name == ":clear":
+        elif name == "/clear":
             self.blocks.clear()
-        elif name == ":raw":
-            self.raw_command = command[len(":raw"):].strip()
+        elif name == "/raw":
+            self.raw_command = command[len(parts[0]):].strip()
             if not self.raw_command:
-                self.add_block(command, "Нет команды", "Напиши :raw codex или :raw vim", "error")
+                self.add_block(command, "Нет команды", "Напиши /raw codex или /raw vim", "error")
         else:
-            self.add_block(command, "Неизвестная команда", "Используй :help", "error")
+            self.add_block(command, "Неизвестная команда", "Используй /help", "error")
 
     def render(self, stdscr: curses.window) -> None:
         h, w = stdscr.getmaxyx()
@@ -405,7 +441,7 @@ class App:
         prompt += self.line if not self.direct_input else ""
         self._line(stdscr, h - 2, 0, prompt, curses.color_pair(1))
         mode = "session" if self.session is not None else "isolated"
-        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  :help "
+        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help "
         self._line(stdscr, h - 1, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
@@ -471,7 +507,7 @@ def run_ui(config: Config) -> None:
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(65)
-        app.add_block("", "Terminal AI запущен", "Вводи команды ниже. Для списка возможностей напиши :help.")
+        app.add_block("", "Terminal AI запущен", "Вводи команды ниже. Для списка возможностей напиши /help.")
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
