@@ -21,6 +21,28 @@ from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_rea
 from .session import PersistentShell
 
 
+# The xterm alternate screen separates the TUI from regular shell scrollback.
+# Re-enter after curses.endwin() or a fullscreen child switches buffers.
+_ALT_SCREEN_ON = b"\x1b[?1049h"
+
+
+def enter_app_screen() -> None:
+    """Restore the private terminal screen after returning from child TUI."""
+    if os.isatty(sys.stdout.fileno()):
+        os.write(sys.stdout.fileno(), _ALT_SCREEN_ON)
+
+
+def configure_colors(background: int) -> None:
+    """Blue shell prompt and slightly richer green headings."""
+    prompt_blue = 75 if curses.COLORS >= 256 else curses.COLOR_BLUE
+    heading_green = 114 if curses.COLORS >= 256 else curses.COLOR_GREEN
+    curses.init_pair(1, prompt_blue, background)
+    curses.init_pair(2, curses.COLOR_GREEN, background)  # Bright checkmark.
+    curses.init_pair(3, curses.COLOR_RED, background)
+    curses.init_pair(4, curses.COLOR_WHITE, background)
+    curses.init_pair(5, heading_green, background)
+
+
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
                             "server", "ai", "explain", "language", "expand", "clear", "raw"})
 
@@ -576,13 +598,8 @@ def run_ui(config: Config) -> None:
             bg = -1
         except curses.error:
             bg = curses.COLOR_BLACK
-        curses.init_pair(1, curses.COLOR_CYAN, bg)
-        curses.init_pair(2, curses.COLOR_GREEN, bg)
-        curses.init_pair(3, curses.COLOR_RED, bg)
-        curses.init_pair(4, curses.COLOR_WHITE, bg)
-        # Codex-like muted green for headings; preserve bright green checkmarks.
-        soft_green = 151 if curses.COLORS >= 256 else curses.COLOR_GREEN
-        curses.init_pair(5, soft_green, bg)
+        configure_colors(bg)
+        enter_app_screen()  # Do not expose original shell scrollback inside TUI.
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(65)
@@ -602,6 +619,8 @@ def run_ui(config: Config) -> None:
                         from .raw import run_raw_command
                         b = app.add_block(command, "Интерактивная программа", "Открыта в полном терминале.", "running")
                         curses.endwin()
+                        # endwin() can return to the original shell buffer.
+                        enter_app_screen()
                         try:
                             code, _ = run_raw_command(config.shell, command, app.cwd, config.max_output_lines)
                             # A full-screen TUI has redraws, not a meaningful text
@@ -616,8 +635,11 @@ def run_ui(config: Config) -> None:
                             b.status = "error"
                             b.title, b.explanation = "Не удалось открыть программу", str(exc)
                         finally:
+                            # Interactive programs may exit the alternate buffer.
+                            # Restore the private screen before curses redraws.
+                            enter_app_screen()
                             curses.reset_prog_mode()
-                            stdscr.clear()  # Force a clean redraw after an alternate-screen TUI.
+                            stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
                 app.render(stdscr)
