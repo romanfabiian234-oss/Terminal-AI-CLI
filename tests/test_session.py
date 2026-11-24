@@ -82,6 +82,35 @@ class PersistentPTY(unittest.TestCase):
         finally:
             app.stop()
 
+    def test_interrupt_foreground_job_preserves_shell(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = self.shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            app.meta(':session on')
+            app.start('sleep 8', 25, 90)
+            time.sleep(0.25)
+            app.key('\x03', 25, 90)
+            for _ in range(300):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(.01)
+            self.assertIsNone(app.active)
+            self.assertIsNotNone(app.session)
+            self.assertEqual(app.blocks[-1].status, 'error')
+            app.start('echo shell-preserved', 25, 90)
+            for _ in range(300):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(.01)
+            self.assertIsNone(app.active)
+            self.assertIn('shell-preserved', app.blocks[-1].output.excerpt())
+        finally:
+            app.stop()
+
 
 if __name__ == '__main__':
     unittest.main()

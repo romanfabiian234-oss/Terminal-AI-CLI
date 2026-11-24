@@ -16,6 +16,7 @@ from pathlib import Path
 
 
 SHELL_SCRIPT = r'''
+trap ':' INT
 while IFS= read -r __tai_command; do
   printf '\033]777;%s;BEGIN\007' "$TAI_SESSION_TOKEN"
   eval "$__tai_command"
@@ -140,11 +141,25 @@ class PersistentShell:
             pass
 
     def interrupt(self) -> None:
-        # PTY control character is safer than indiscriminately killing the whole shell group.
-        self.send_raw(b"\x03")
+        # SIGINT aborts an interactive bash -ic evaluation loop itself.
+        # Terminate only the foreground child job where possible, preserving
+        # the long-lived parent shell and its environment.
+        foreground = os.tcgetpgrp(self.master)
+        if foreground > 0 and foreground != self.process.pid:
+            os.killpg(foreground, signal.SIGTERM)
+        else:
+            # Shell builtins may run in the shell group. Its state may be lost
+            # when interrupted; the UI detects and reports that outcome.
+            self.send_raw(b"\x03")
 
     def stop(self) -> None:
         if self.process.poll() is None:
+            try:
+                foreground = os.tcgetpgrp(self.master)
+                if foreground > 0 and foreground != self.process.pid:
+                    os.killpg(foreground, signal.SIGHUP)
+            except OSError:
+                pass
             try:
                 os.killpg(self.process.pid, signal.SIGTERM)
                 self.process.wait(timeout=1)
