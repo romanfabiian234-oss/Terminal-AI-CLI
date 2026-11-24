@@ -5,6 +5,7 @@ import curses
 import fcntl
 import os
 import pty
+import socket
 import shlex
 import signal
 import subprocess
@@ -38,6 +39,8 @@ class App:
         self.cfg = cfg
         self.worker = AiWorker(cfg)
         self.cwd = Path.cwd()
+        # The shell-like prompt is derived from the actual host and directory.
+        self.hostname = socket.gethostname().split(".")[0] or "mac"
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
         self.next_id = 1
         self.line = ""
@@ -179,16 +182,23 @@ class App:
                 continue
             if phase in ("partial", "done") and text.strip():
                 b.explanation = text.strip().replace("\n", " ")[:220]
+                b.ai_state = "ready" if phase == "done" else "streaming"
                 if manual:
                     b.title = "Объяснение ИИ" if phase == "done" else "ИИ отвечает"
                     b.status = "ok" if phase == "done" else "running"
                 self.ai_state = "streaming" if phase == "partial" else "ready"
             elif phase == "unavailable":
+                b.ai_state = "unavailable"
                 if manual:
                     b.status = "error"
                     b.title = "ИИ не ответил"
                     b.explanation = text or "Не удалось получить ответ модели."
                 self.ai_state = "model unavailable / rules active"
+            elif phase == "timing":
+                try:
+                    b.ai_seconds = max(0, float(text))
+                except (ValueError, OverflowError):
+                    pass
             changed = True
         if self._run_pending():
             changed = True
@@ -203,8 +213,25 @@ class App:
             self.ai_state = "ready / rules"
             return
         if self.worker.submit(b):
+            self._track_model(b)
             b.analysed = True
             self.ai_state = "thinking"
+
+    def _track_model(self, block: Block) -> None:
+        profile = self.cfg.profile()
+        block.ai_profile = profile.name
+        block.ai_model = profile.model
+        block.ai_seconds = None
+        block.ai_state = "thinking"
+
+    def prompt(self) -> str:
+        """Real hostname and directory, like a standard zsh prompt."""
+        try:
+            relative = self.cwd.relative_to(Path.home())
+            directory = "~" if not relative.parts else "~/" + relative.as_posix()
+        except ValueError:
+            directory = str(self.cwd)
+        return f"{self.hostname} {directory} % "
 
     def resize(self, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
@@ -376,6 +403,7 @@ class App:
                 request = self.add_block("/explain", "ИИ анализирует",
                                          f"Проверяю команду: {source.command[:120]}", "running")
                 if self.worker.submit(request, source=source):
+                    self._track_model(request)
                     self.ai_state = "thinking"
                 else:
                     request.title = "ИИ занят"
@@ -407,16 +435,25 @@ class App:
             stdscr.refresh()
             return
         stdscr.erase()
-        title = " Terminal AI CLI  •  пояснения над техническим выводом "
-        self._line(stdscr, 0, 0, title, curses.color_pair(1) | curses.A_BOLD)
-        self._line(stdscr, 1, 0, "─" * max(0, w - 1), curses.color_pair(4))
-        viewport: list[tuple[str, int]] = []
+        # Keep the terminal empty on startup. Blocks appear only after commands.
+        viewport: list[tuple[str, int, bool]] = []
         for block in self.blocks:
-            color = curses.color_pair(2 if block.status == "ok" else 3 if block.status == "error" else 1)
-            icon = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
-            viewport.append((f"{icon} {block.title}", color | curses.A_BOLD))
-            viewport.extend(("  " + line, 0) for line in self._wrap(block.explanation, w - 3))
-            viewport.extend(("  └ " + line, curses.color_pair(4)) for line in self._wrap(block.command, w - 6))
+            heading = curses.color_pair(3 if block.status == "error" else 5) | curses.A_BOLD
+            symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
+            viewport.append((f"{symbol} {block.title}", heading, block.status == "ok"))
+            viewport.extend(("  " + line, 0, False) for line in self._wrap(block.explanation, w - 3))
+            if block.ai_model:
+                detail = f"  ИИ: {block.ai_model} ({block.ai_profile})"
+                if block.ai_seconds is not None:
+                    detail += f" · ответ за {block.ai_seconds:.2f} с"
+                elif block.ai_state in ("thinking", "streaming"):
+                    detail += " · анализ..."
+                if block.ai_state == "unavailable":
+                    detail += " · недоступен"
+                viewport.extend((line, curses.color_pair(4), False)
+                                for line in self._wrap(detail, w - 3))
+            viewport.extend(("  └ " + line, curses.color_pair(4), False)
+                            for line in self._wrap(block.command, w - 6))
             output = block.output.snapshot()
             if block.expanded:
                 selected = output
@@ -425,28 +462,40 @@ class App:
             else:
                 selected = output[:3]
             for line in selected:
-                viewport.extend(("    " + item, curses.color_pair(4)) for item in self._wrap(line, w - 6))
+                viewport.extend(("    " + item, curses.color_pair(4), False)
+                                for item in self._wrap(line, w - 6))
             if not block.expanded and len(output) > len(selected):
-                viewport.append((f"    +{len(output) - len(selected)} строк (Ctrl+T — развернуть)", curses.color_pair(4)))
-            viewport.append(("", 0))
-        visible = h - 5
-        start = max(0, len(viewport) - visible - self.scroll)
-        for y, (line, attr) in enumerate(viewport[start:start + visible], 2):
-            self._line(stdscr, y, 0, line, attr)
-        self._line(stdscr, h - 3, 0, "─" * (w - 1), curses.color_pair(4))
-        prompt = f"❯ {self.cwd.name or '/'} % "
+                viewport.append((f"    +{len(output) - len(selected)} строк (Ctrl+T — развернуть)",
+                                 curses.color_pair(4), False))
+            viewport.append(("", 0, False))
+
+        # Like a shell: prompt follows the last block, moving to the bottom only
+        # when content needs more vertical space. No permanent header or separator.
+        prompt_y = min(h - 2, len(viewport)) if viewport else 0
+        start = max(0, len(viewport) - prompt_y - self.scroll)
+        for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
+            if success and line.startswith("✓ "):
+                self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
+                self._line(stdscr, y, 1, line[1:], attr)
+            else:
+                self._line(stdscr, y, 0, line, attr)
+
+        prompt = self.prompt()
         if self.active:
             mode_hint = "stdin" if self.direct_input else f"очередь {len(self.pending)}"
-            prompt = f"❯ {mode_hint} % "
-        prompt += self.line if not self.direct_input else ""
-        self._line(stdscr, h - 2, 0, prompt, curses.color_pair(1))
-        mode = "session" if self.session is not None else "isolated"
-        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help "
-        self._line(stdscr, h - 1, 0, status, curses.color_pair(4))
+            prompt += f"[{mode_hint}] "
+        if not self.direct_input:
+            prompt += self.line
+        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
+        if viewport and prompt_y + 1 < h:
+            mode = "session" if self.session is not None else "isolated"
+            status = (f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
+                      "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help")
+            self._line(stdscr, prompt_y + 1, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
             try:
-                stdscr.move(h - 2, cursor_x)
+                stdscr.move(prompt_y, cursor_x)
             except curses.error:
                 pass
         stdscr.refresh()
@@ -504,10 +553,12 @@ def run_ui(config: Config) -> None:
         curses.init_pair(2, curses.COLOR_GREEN, bg)
         curses.init_pair(3, curses.COLOR_RED, bg)
         curses.init_pair(4, curses.COLOR_WHITE, bg)
+        # Codex-like muted green for headings; preserve bright green checkmarks.
+        soft_green = 151 if curses.COLORS >= 256 else curses.COLOR_GREEN
+        curses.init_pair(5, soft_green, bg)
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(65)
-        app.add_block("", "Terminal AI запущен", "Вводи команды ниже. Для списка возможностей напиши /help.")
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
