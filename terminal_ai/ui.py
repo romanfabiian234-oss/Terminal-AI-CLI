@@ -33,6 +33,27 @@ def is_meta_command(command: str) -> bool:
     name = parts[0]
     return name.startswith(":") or (name.startswith("/") and name[1:] in SLASH_COMMANDS)
 
+# Full-screen programs must control the terminal directly.  Treat only a
+# standalone invocation as interactive: pipelines and compound commands keep
+# their normal shell behavior, and `codex exec` remains non-interactive.
+def needs_fullscreen(command: str) -> bool:
+    if any(ch in command for ch in (";", "|", "<", ">", "`", "\n", "\r")) or "$(" in command:
+        return False
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        return False
+    if not parts:
+        return False
+    executable = Path(parts[0]).name
+    if executable == "codex":
+        if len(parts) == 1 or parts[1] in {"resume", "fork"}:
+            return True
+        # Flags such as `codex -m model` start the interactive CLI.  Keep
+        # `codex exec` and plain help/version commands in the block runner.
+        return parts[1].startswith("-") and parts[1] not in {"-h", "--help", "-V", "--version"}
+    return executable in {"vim", "nvim", "nano", "htop", "btop"}
+
 
 class App:
     def __init__(self, cfg: Config):
@@ -269,6 +290,11 @@ class App:
                 # /raw needs to run in the main loop with curses suspended.
                 if getattr(self, "raw_command", ""):
                     break
+            elif needs_fullscreen(command):
+                # Codex/Vim cannot render through the line-based block parser.
+                # Launch the existing transparent PTY path instead.
+                self.raw_command = command
+                break
             elif self.session is None and (command == "cd" or command.startswith("cd ")):
                 try:
                     args = shlex.split(command)
@@ -573,19 +599,24 @@ def run_ui(config: Config) -> None:
                     app.raw_command = ""
                     if command:
                         from .raw import run_raw_command
-                        b = app.add_block(command, "Прямой терминал", "Полноэкранная программа работает без вмешательства ИИ.", "running")
+                        b = app.add_block(command, "Интерактивная программа", "Открыта в полном терминале.", "running")
                         curses.endwin()
                         try:
-                            code, captured = run_raw_command(config.shell, command, app.cwd, config.max_output_lines)
-                            b.output = captured
-                            b.finish(code)
-                            app._queue_ai(b)
-                            print("\nНажми Enter, чтобы вернуться в Terminal AI...", flush=True)
-                            input()
+                            code, _ = run_raw_command(config.shell, command, app.cwd, config.max_output_lines)
+                            # A full-screen TUI has redraws, not a meaningful text
+                            # transcript. Never paste those frames into a block
+                            # or send them to a model as command output.
+                            b.exit_code = code
+                            b.status = "ok" if code == 0 else "error"
+                            b.title = "Интерактивная программа закрыта" if code == 0 else "Программа завершилась с ошибкой"
+                            b.explanation = f"{command.split()[0]} завершён (код {code})."
                         except (OSError, ValueError) as exc:
+                            b.exit_code = 127
                             b.status = "error"
-                            b.title, b.explanation = "Не удалось запустить прямой терминал", str(exc)
+                            b.title, b.explanation = "Не удалось открыть программу", str(exc)
                         finally:
+                            curses.reset_prog_mode()
+                            stdscr.clear()  # Force a clean redraw after an alternate-screen TUI.
                             stdscr.refresh()
                         app._run_pending()
                 app.render(stdscr)
