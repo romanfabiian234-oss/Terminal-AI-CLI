@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from terminal_ai.core import (Block, ModelProfile, ScreenText, Config, explain_rules,
-                              iter_explanation, load_config, redact, CONFIG_SAMPLE)
+                              iter_explanation, load_config, redact, CONFIG_SAMPLE, simple_read_command)
 from terminal_ai.ui import App
 
 
@@ -74,6 +74,16 @@ class RuleTests(unittest.TestCase):
 
     def test_rule_build(self):
         self.assertIn('Сборка', explain_rules('npm run build', 'Finished', 0)[0])
+
+    def test_simple_commands_do_not_need_ai(self):
+        for command, title in (("ls", "Содержимое папки"), ("ls -la", "Содержимое папки"),
+                               ("pwd", "Текущая папка"), ("whoami", "Текущий пользователь")):
+            self.assertIsNotNone(simple_read_command(command))
+            self.assertEqual(explain_rules(command, "", 0)[0], title)
+        for command in ("lsof", "ls; echo second", "ls && echo second", "ls $(echo secret)",
+                        "ls --help", "ls > output.txt", "ls | head"):
+            self.assertIsNone(simple_read_command(command))
+        self.assertEqual(explain_rules("ls", "error", 2)[0], "Команда завершилась с ошибкой")
 
 
 class ModelTests(unittest.TestCase):
@@ -161,6 +171,27 @@ class ModelTests(unittest.TestCase):
 
 
 class AppTests(unittest.TestCase):
+    def test_read_only_commands_skip_ai_unless_requested(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        app = App(cfg)
+        calls = []
+        app.worker.submit = lambda block: calls.append(block.command) or True
+        b = app.add_block('ls', 'temporary', '')
+        b.finish(0)
+        app._queue_ai(b)
+        self.assertEqual(calls, [])
+        self.assertEqual(b.title, 'Содержимое папки')
+        running = app.add_block('ls', 'temporary', '')
+        app._queue_ai(running)
+        self.assertEqual(calls, [])
+        app.meta(':explain')
+        self.assertEqual(calls, ['ls'])
+        b2 = app.add_block('ls', 'temporary', '')
+        b2.finish(2)
+        app._queue_ai(b2)
+        self.assertEqual(calls, ['ls', 'ls'])
+
+
     def test_cd_and_unknown_model(self):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
         app = App(cfg)
