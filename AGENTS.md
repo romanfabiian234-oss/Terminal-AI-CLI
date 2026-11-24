@@ -5,7 +5,7 @@ This repository implements a local-first Terminal AI CLI for macOS. Work on the 
 ## Applicable guidance
 
 - Follow the owner's [PerfectSkills/PerfectCode](https://github.com/romanfabiian234-oss/PerfectSkills/blob/main/skills/perfectcode/SKILL.md) when accessible. The owner's request and current repository evidence take precedence; if the external skill is unavailable, do not invent its contents.
-- Read [PLAN.md](PLAN.md), [README.md](README.md), existing tests and the latest [source report](reports/2026-11-24-mvp.md) before substantial changes. Reuse existing logic instead of adding a second runner, state store, or backend.
+- Read [PLAN.md](PLAN.md), [README.md](README.md), existing tests and the [baseline report](reports/2026-11-24-mvp.md) and [persistent-shell checkpoint](reports/2026-11-24-persistent-shell.md) before substantial changes. Reuse existing logic instead of adding a second runner, state store, or backend.
 - Deliver meaningful increments in sequence. Prefer a minimal working path with reliable tests over speculative architecture. On a bug, confirm the cause and add a focused regression test. Do a final simplification/review pass.
 
 ## Non-negotiable behavior
@@ -27,7 +27,7 @@ This repository implements a local-first Terminal AI CLI for macOS. Work on the 
 
 ## Next gates
 
-- Persistent interactive shell with clean command boundaries and safe fullscreen fallback.
+- Verify the opt-in persistent PTY shell on macOS/Zsh (including Ctrl+C and interaction) before making it the default; Linux/Bash tests alone do not close this gate.
 - Model/server configuration improvements and observable latency/quality tests.
 - Real macOS validation (Terminal.app, iTerm2, Codex CLI) and fixes.
 - Release only after passing documented checks; never mark a stage ACCEPTED without the required review.
