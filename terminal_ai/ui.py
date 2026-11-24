@@ -28,6 +28,8 @@ class App:
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
         self.next_id = 1
         self.line = ""
+        self.pending: deque[str] = deque()
+        self.direct_input = False  # Ctrl+G enables stdin forwarding for interactive commands.
         self.history: list[str] = []
         self.hist_pos = 0
         self.scroll = 0
@@ -102,6 +104,7 @@ class App:
         block.analysis_epoch += 1  # Cancel pending incomplete explanations.
         self._queue_ai(block)
         self.active = None
+        self.direct_input = False
 
     def poll(self) -> bool:
         changed = False
@@ -166,6 +169,8 @@ class App:
             elif phase == "unavailable":
                 self.ai_state = "offline / rules active"
             changed = True
+        if self._run_pending():
+            changed = True
         return changed
 
     def _queue_ai(self, b: Block, *, force: bool = False) -> None:
@@ -205,6 +210,34 @@ class App:
             except OSError:
                 pass
 
+    def _run_pending(self) -> bool:
+        """Run queued lines in order, never writing pasted commands to a busy PTY."""
+        changed = False
+        while not self.active and self.pending and not self.should_exit:
+            command = self.pending.popleft()
+            changed = True
+            if command.startswith(":"):
+                self.meta(command)
+                # :raw needs to run in the main loop with curses suspended.
+                if getattr(self, "raw_command", ""):
+                    break
+            elif self.session is None and (command == "cd" or command.startswith("cd ")):
+                try:
+                    args = shlex.split(command)
+                    dest = Path(os.path.expandvars(os.path.expanduser(args[1] if len(args) > 1 else "~")))
+                    if not dest.is_absolute():
+                        dest = self.cwd / dest
+                    dest = dest.resolve(strict=True)
+                    if not dest.is_dir():
+                        raise NotADirectoryError(dest)
+                    self.cwd = dest
+                    self.add_block(command, "Папка изменена", str(dest))
+                except (ValueError, OSError, IndexError) as exc:
+                    self.add_block(command, "Не удалось перейти в папку", str(exc), "error")
+            else:
+                self.start(command, self.last_rows, self.last_cols)
+        return changed
+
     def key(self, key: str | int, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
         if key == curses.KEY_RESIZE:
@@ -225,8 +258,10 @@ class App:
                 self.blocks.clear()
                 self.scroll = 0
             return
-        if self.active:
-            if key == "\x03":
+        if key == "\x03":  # Ctrl+C: stop current process and cancel pending commands.
+            self.pending.clear()
+            self.line = ""
+            if self.active:
                 if self.session is not None:
                     try:
                         self.session.interrupt()
@@ -237,7 +272,12 @@ class App:
                         os.killpg(self.process.pid, signal.SIGINT)
                     except ProcessLookupError:
                         pass
-            elif isinstance(key, str):
+            return
+        if self.active and key == "\x07":  # Ctrl+G: toggle interactive stdin.
+            self.direct_input = not self.direct_input
+            return
+        if self.active and self.direct_input:
+            if isinstance(key, str):
                 self._send(b"\x7f" if key in ("\x08", "\x7f") else key.encode("utf-8", "replace"))
             else:
                 special = {curses.KEY_UP: b"\x1b[A", curses.KEY_DOWN: b"\x1b[B", curses.KEY_LEFT: b"\x1b[D", curses.KEY_RIGHT: b"\x1b[C", curses.KEY_BACKSPACE: b"\x7f", curses.KEY_ENTER: b"\n"}
@@ -249,25 +289,13 @@ class App:
             self.line = ""
             if not command:
                 return
+            if len(self.pending) >= 32:
+                self.add_block(command, "Очередь заполнена", "Допускается до 32 команд в ожидании.", "error")
+                return
             self.history.append(command)
             self.hist_pos = len(self.history)
-            if command.startswith(":"):
-                self.meta(command)
-            elif self.session is None and (command == "cd" or command.startswith("cd ")):
-                try:
-                    args = shlex.split(command)
-                    dest = Path(os.path.expandvars(os.path.expanduser(args[1] if len(args) > 1 else "~")))
-                    if not dest.is_absolute():
-                        dest = self.cwd / dest
-                    dest = dest.resolve(strict=True)
-                    if not dest.is_dir():
-                        raise NotADirectoryError(dest)
-                    self.cwd = dest
-                    self.add_block(command, "Папка изменена", str(dest))
-                except (ValueError, OSError, IndexError) as exc:
-                    self.add_block(command, "Не удалось перейти в папку", str(exc), "error")
-            else:
-                self.start(command, rows, cols)
+            self.pending.append(command)
+            self._run_pending()
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
             self.line = self.line[:-1]
         elif key == curses.KEY_UP and self.history:
@@ -276,7 +304,7 @@ class App:
         elif key == curses.KEY_DOWN and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
-        elif key == "\x04" and not self.line:
+        elif key == "\x04" and not self.line and self.active is None:
             self.should_exit = True
         elif isinstance(key, str) and key.isprintable() and len(self.line) < 4096:
             self.line += key
@@ -373,15 +401,15 @@ class App:
         self._line(stdscr, h - 3, 0, "─" * (w - 1), curses.color_pair(4))
         prompt = f"❯ {self.cwd.name or '/'} % "
         if self.active:
-            prompt = "❯ Команда работает • ввод направляется программе (Ctrl+C — прервать)"
-        else:
-            prompt += self.line
+            mode_hint = "stdin" if self.direct_input else f"очередь {len(self.pending)}"
+            prompt = f"❯ {mode_hint} % "
+        prompt += self.line if not self.direct_input else ""
         self._line(stdscr, h - 2, 0, prompt, curses.color_pair(1))
         mode = "session" if self.session is not None else "isolated"
-        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+T: детали  PgUp/PgDn: история  :help "
+        status = f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}     Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  :help "
         self._line(stdscr, h - 1, 0, status, curses.color_pair(4))
-        if self.active is None:
-            cursor_x = min(w - 2, len(f"❯ {self.cwd.name or '/'} % ") + len(self.line))
+        if not self.direct_input:
+            cursor_x = min(w - 2, len(prompt))
             try:
                 stdscr.move(h - 2, cursor_x)
             except curses.error:
@@ -473,6 +501,7 @@ def run_ui(config: Config) -> None:
                             b.title, b.explanation = "Не удалось запустить прямой терминал", str(exc)
                         finally:
                             stdscr.refresh()
+                        app._run_pending()
                 app.render(stdscr)
         finally:
             app.stop()
