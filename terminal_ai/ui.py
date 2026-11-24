@@ -16,7 +16,7 @@ import time
 from collections import deque
 from pathlib import Path
 
-from .core import AiWorker, Block, Config, ScreenText, explain_rules
+from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_read_command
 from .session import PersistentShell
 
 
@@ -160,15 +160,21 @@ class App:
             if not b or b.analysis_epoch != epoch:
                 continue
             if phase in ("partial", "done") and text.strip():
-                b.explanation = text.strip()[:600]
+                # Prevent long model text from taking over the event timeline.
+                b.explanation = text.strip().replace("\n", " ")[:220]
                 self.ai_state = "streaming" if phase == "partial" else "ready"
             elif phase == "unavailable":
                 self.ai_state = "offline / rules active"
             changed = True
         return changed
 
-    def _queue_ai(self, b: Block) -> None:
+    def _queue_ai(self, b: Block, *, force: bool = False) -> None:
         if not self.ai_on:
+            return
+        # Deterministic explanations are faster and more reliable for basic
+        # read-only shell commands. :explain still allows a manual AI request.
+        if not force and b.exit_code in (None, 0) and simple_read_command(b.command):
+            self.ai_state = "ready / rules"
             return
         if self.worker.submit(b):
             b.analysed = True
@@ -309,7 +315,7 @@ class App:
             self.add_block(command, "Режим анализа", "ИИ включён" if self.ai_on else "ИИ отключён. Работают только правила.")
         elif name == ":explain":
             if self.blocks and self.blocks[-1].status != "running":
-                self._queue_ai(self.blocks[-1])
+                self._queue_ai(self.blocks[-1], force=True)
             else:
                 self.add_block(command, "Нет завершённой команды", "После завершения команды повтори :explain.", "error")
         elif name == ":language" and len(parts) == 2:
