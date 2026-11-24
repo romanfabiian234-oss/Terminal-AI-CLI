@@ -86,6 +86,7 @@ class RuleTests(unittest.TestCase):
         self.assertEqual(explain_rules("ls", "error", 2)[0], "Команда завершилась с ошибкой")
 
 
+
 class ModelTests(unittest.TestCase):
     def setUp(self):
         self.requests = []
@@ -191,7 +192,6 @@ class AppTests(unittest.TestCase):
         app._queue_ai(b2)
         self.assertEqual(calls, ['ls', 'ls'])
 
-
     def test_cd_and_unknown_model(self):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
         app = App(cfg)
@@ -230,6 +230,92 @@ class PTYTests(unittest.TestCase):
             self.assertIsNone(app.active)
             self.assertEqual(app.blocks[-1].exit_code, 0)
             self.assertIn('PTY_TEST_OK', app.blocks[-1].output.excerpt())
+        finally:
+            app.stop()
+
+    def test_multiline_paste_creates_separate_blocks(self):
+        import shutil
+        import time
+        shell = shutil.which('bash') or shutil.which('zsh')
+        if not shell:
+            self.skipTest('shell unavailable')
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            # Simulate pasting several newline-separated commands faster than
+            # the first process can finish. Each needs its own block.
+            for ch in 'pwd\nwhoami\ndate\n':
+                app.key(ch, 25, 90)
+            self.assertEqual([b.command for b in app.blocks], ['pwd'])
+            self.assertEqual(list(app.pending), ['whoami', 'date'])
+            for _ in range(400):
+                app.poll()
+                if app.active is None and not app.pending:
+                    break
+                time.sleep(0.01)
+            self.assertEqual([b.command for b in app.blocks], ['pwd', 'whoami', 'date'])
+            self.assertTrue(all(b.exit_code == 0 for b in app.blocks))
+            # Later command text must never be forwarded to the active PTY.
+            self.assertNotIn('whoami', app.blocks[0].output.excerpt())
+            self.assertNotIn('date', app.blocks[0].output.excerpt())
+            self.assertNotIn('date', app.blocks[1].output.excerpt())
+        finally:
+            app.stop()
+
+    def test_ctrl_c_clears_queued_commands(self):
+        import shutil
+        import time
+        shell = shutil.which('bash') or shutil.which('zsh')
+        if not shell:
+            self.skipTest('shell unavailable')
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            app.start('sleep 8', 25, 90)
+            for ch in 'echo SHOULD_NOT_RUN\n':
+                app.key(ch, 25, 90)
+            self.assertEqual(list(app.pending), ['echo SHOULD_NOT_RUN'])
+            app.key('\x03', 25, 90)
+            self.assertEqual(list(app.pending), [])
+            for _ in range(300):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(0.01)
+            self.assertIsNone(app.active)
+            self.assertEqual([b.command for b in app.blocks], ['sleep 8'])
+            self.assertEqual(app.line, '')
+        finally:
+            app.stop()
+
+    def test_ctrl_g_allows_explicit_interactive_stdin(self):
+        import shutil
+        import time
+        shell = shutil.which('bash') or shutil.which('zsh')
+        if not shell:
+            self.skipTest('shell unavailable')
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            app.start('read name; printf "received:%s\\n" "$name"', 25, 90)
+            app.key('\x07', 25, 90)
+            self.assertTrue(app.direct_input)
+            for ch in 'hello\n':
+                app.key(ch, 25, 90)
+            for _ in range(300):
+                app.poll()
+                if app.active is None:
+                    break
+                time.sleep(0.01)
+            self.assertIsNone(app.active)
+            self.assertIn('received:hello', app.blocks[-1].output.excerpt())
+            self.assertFalse(app.direct_input)
         finally:
             app.stop()
 

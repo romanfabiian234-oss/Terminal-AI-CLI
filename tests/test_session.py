@@ -61,6 +61,29 @@ class PersistentPTY(unittest.TestCase):
         finally:
             app.stop()
 
+    def test_queued_commands_preserve_session_state(self):
+        cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
+        cfg.shell = self.shell
+        app = App(cfg)
+        app.ai_on = False
+        try:
+            app.meta(':session on')
+            self.assertIsNotNone(app.session)
+            for char in 'export TAI_QUEUE_TEST=preserved\nprintf "session:%s\\n" "$TAI_QUEUE_TEST"\npwd\n':
+                app.key(char, 25, 100)
+            for _ in range(350):
+                app.poll()
+                if app.active is None and not app.pending:
+                    break
+                time.sleep(.01)
+            blocks = [b for b in app.blocks if b.command in ('export TAI_QUEUE_TEST=preserved', 'printf "session:%s\\n" "$TAI_QUEUE_TEST"', 'pwd')]
+            self.assertEqual(len(blocks), 3)
+            self.assertEqual([b.exit_code for b in blocks], [0, 0, 0])
+            self.assertIn('session:preserved', blocks[1].output.excerpt())
+            self.assertNotIn('pwd', blocks[1].output.excerpt())
+        finally:
+            app.stop()
+
     def test_nonzero_exit_and_shell_survives(self):
         cfg = load_config(Path('/tmp/terminal-ai-unlikely-unexisting-file-8175'))
         cfg.shell = self.shell
