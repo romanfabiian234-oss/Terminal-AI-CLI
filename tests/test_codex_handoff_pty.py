@@ -20,7 +20,7 @@ class AlternateScreenPTY(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
             executable = Path(temp) / "codex"
-            executable.write_text('#!/bin/sh\nprintf "\\033[?1049h\\033[2J\\033[HCHILD_TUI\\n"\nsleep 0.10\nprintf "\\033[?1049l"\n')
+            executable.write_text('#!/bin/sh\n[ "$1" = "--no-alt-screen" ] || exit 55\nprintf "OpenAI Codex\nTo get started: /init /status\nAsk Codex to do anything\n"\nsleep 0.10\n')
             executable.chmod(0o755)
             config = Path(temp) / "config.toml"
             config.write_text(
@@ -42,7 +42,7 @@ class AlternateScreenPTY(unittest.TestCase):
                 process.expect(pexpect.EOF)
                 process.close()
                 self.assertEqual(process.exitstatus, 0)
-                self.assertIn(b"CHILD_TUI", process.before)
+                self.assertIn(b"OpenAI Codex", process.before)
                 self.assertEqual(process.before.count(b"\x1b[?1049h"), 2)
             finally:
                 if process.isalive():
