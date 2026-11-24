@@ -259,7 +259,6 @@ class AppTests(unittest.TestCase):
         app = App(cfg)
         app.meta('/explain')
         self.assertEqual(app.blocks[-1].status, 'error')
-        self.assertEqual(app.blocks[-1].status, 'error')
         self.assertIn('Сначала', app.blocks[-1].explanation)
         b = app.add_block('git status', 'placeholder', '')
         b.finish(0)
