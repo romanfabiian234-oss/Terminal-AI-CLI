@@ -93,7 +93,7 @@ def needs_fullscreen(command: str) -> bool:
     return executable in {"vim", "nvim", "nano", "htop", "btop"}
 
 def fullscreen_launch_command(command: str) -> str:
-    """Ask interactive Codex to use its own alternate buffer in this session.
+    """Use Codex's familiar inline layout inside a separately isolated screen.
 
     Do not rewrite shell expressions or explicit user choices; unlike an edit to
     ~/.codex/config.toml this only affects one interactive launch.
@@ -110,7 +110,24 @@ def fullscreen_launch_command(command: str) -> str:
         return command
     if "--no-alt-screen" in args or any("tui.alternate_screen" in arg for arg in args):
         return command
-    return shlex.join([args[0], "-c", 'tui.alternate_screen="always"', *args[1:]])
+    return shlex.join([args[0], "--no-alt-screen", *args[1:]])
+
+
+def codex_inline_screen(command: str) -> bool:
+    """Only interactive Codex in inline mode needs a private outer screen."""
+    try:
+        args = shlex.split(command)
+    except ValueError:
+        return False
+    return bool(args and Path(args[0]).name == "codex" and
+                "--no-alt-screen" in args and needs_fullscreen(command))
+
+
+def child_screen(enter: bool) -> None:
+    """Isolate inline Codex without clearing the user's normal scrollback."""
+    if os.isatty(sys.stdout.fileno()):
+        os.write(sys.stdout.fileno(),
+                 b"\x1b[?1049h\x1b[2J\x1b[H" if enter else b"\x1b[?1049l")
 
 
 class App:
@@ -670,9 +687,12 @@ def run_ui(config: Config) -> None:
                             curses.mousemask(0)
                         except curses.error:
                             pass
-                        curses.endwin()  # Give the child the real terminal.
+                        curses.endwin()  # Release curses' screen before the child starts.
+                        child_command = fullscreen_launch_command(command)
+                        inline_screen = codex_inline_screen(child_command)
                         try:
-                            child_command = fullscreen_launch_command(command)
+                            if inline_screen:
+                                child_screen(True)
                             code, _ = run_raw_command(config.shell, child_command, app.cwd, config.max_output_lines)
                             # A full-screen TUI has redraws, not a meaningful text
                             # transcript. Never paste those frames into a block
@@ -686,8 +706,9 @@ def run_ui(config: Config) -> None:
                             b.status = "error"
                             b.title, b.explanation = "Не удалось открыть программу", str(exc)
                         finally:
-                            # Restore curses exactly once. Nested ?1049h/l
-                            # switches previously leaked the main scrollback.
+                            if inline_screen:
+                                child_screen(False)
+                            # Restore curses only after Codex leaves its own screen.
                             curses.reset_prog_mode()
                             enable_mouse_wheel()
                             stdscr.clear()

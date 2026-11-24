@@ -67,6 +67,7 @@ class RawLifecycle(unittest.TestCase):
              patch('terminal_ai.ui.enter_app_screen', side_effect=lambda: calls.append('private')), \
              patch('terminal_ai.ui.curses.endwin', side_effect=lambda: calls.append('endwin')), \
              patch('terminal_ai.ui.curses.reset_prog_mode', side_effect=lambda: calls.append('resume')), \
+             patch('terminal_ai.ui.child_screen', side_effect=lambda active: calls.append('child-screen-on' if active else 'child-screen-off')), \
              patch('terminal_ai.ui.curses.color_pair', return_value=0), \
              patch('terminal_ai.ui.curses.curs_set'), \
              patch('terminal_ai.ui.curses.init_pair'), \
@@ -75,7 +76,7 @@ class RawLifecycle(unittest.TestCase):
              patch.object(curses, 'COLORS', 256, create=True), \
              patch('terminal_ai.raw.run_raw_command', side_effect=run_mock):
             run_ui(cfg)
-        self.assertEqual(calls, ['endwin', 'child', 'resume'])
+        self.assertEqual(calls, ['endwin', 'child-screen-on', 'child', 'child-screen-off', 'resume'])
 
 
 if __name__ == '__main__':
