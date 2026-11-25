@@ -214,7 +214,7 @@ class Block:
     explanation: str = ""
     status: str = "running"
     exit_code: int | None = None
-    expanded: bool = False
+    expanded: bool = True  # Show every output line by default; Ctrl+T collapses on demand.
     started: float = field(default_factory=time.monotonic)
     analysed: bool = False
     analysis_epoch: int = 0
