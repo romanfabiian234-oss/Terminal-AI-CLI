@@ -71,7 +71,8 @@ def wheel_scroll_step(rows: int) -> int:
 
 
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
-                            "server", "ai", "explain", "language", "expand", "clear", "raw"})
+                            "server", "ai", "explain", "language", "expand",
+                            "clear", "raw", "scroll-debug"})
 
 
 def is_meta_command(command: str) -> bool:
@@ -160,6 +161,10 @@ class App:
         self.history: list[str] = []
         self.hist_pos = 0
         self.scroll = 0
+        # Terminal.app may report alternate-screen wheel gestures as arrows.
+        self.scroll_wheel_events = 0
+        self.scroll_arrow_events = 0
+        self.scroll_debug = False
         self.ai_on = True
         self.ai_state = "local / idle"
         self.session: PersistentShell | None = None
@@ -441,8 +446,10 @@ class App:
                 step = wheel_scroll_step(rows)
                 if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
                     self.scroll += step
+                    self.scroll_wheel_events += 1
                 if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
                     self.scroll = max(0, self.scroll - step)
+                    self.scroll_wheel_events += 1
             except curses.error:
                 pass
             return
@@ -513,10 +520,20 @@ class App:
             self._run_pending()
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
             self.line = self.line[:-1]
-        elif key == curses.KEY_UP and self.history:
+        elif key in (curses.KEY_UP, curses.KEY_DOWN) and not self.line and self.blocks:
+            # Apple Terminal's "Scroll alternate screen" can turn the trackpad
+            # into repeated arrow keys rather than KEY_MOUSE. While the prompt
+            # is empty, arrows navigate the output; Ctrl+P/N access history.
+            step = wheel_scroll_step(rows)
+            if key == curses.KEY_UP:
+                self.scroll += step
+            else:
+                self.scroll = max(0, self.scroll - step)
+            self.scroll_arrow_events += 1
+        elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
             self.line = self.history[self.hist_pos]
-        elif key == curses.KEY_DOWN and self.history:
+        elif key in (curses.KEY_DOWN, "\x0e") and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
         elif key == "\x04" and not self.line and self.active is None:
@@ -530,7 +547,7 @@ class App:
         if name in ("/quit", "/exit"):
             self.should_exit = True
         elif name == "/help":
-            self.add_block(command, "Команды приложения", "/session on/off · /models · /model NAME · /server NAME · /language ru/uk/en · /explain · /ai on/off · /expand · /clear · /exit · /raw COMMAND")
+            self.add_block(command, "Команды приложения", "/session on/off · /models · /model NAME · /server NAME · /language ru/uk/en · /explain · /ai on/off · /expand · /scroll-debug on/off · /clear · /exit · /raw COMMAND")
         elif name == "/session" and len(parts) == 2 and parts[1] in ("on", "off"):
             if parts[1] == "on" and self.session is None:
                 try:
@@ -544,6 +561,11 @@ class App:
                 self.add_block(command, "Постоянная сессия выключена", "Обычные команды снова выполняются отдельно.")
             else:
                 self.add_block(command, "Режим сессии", "Уже включён" if self.session else "Уже выключен")
+        elif name == "/scroll-debug" and len(parts) == 2 and parts[1] in ("on", "off"):
+            self.scroll_debug = parts[1] == "on"
+            self.add_block(command, "Диагностика прокрутки",
+                           "Включена: счётчики событий видны под строкой ввода."
+                           if self.scroll_debug else "Выключена.")
         elif name == "/models":
             names = ", ".join(f"{n} ({p.provider}: {p.model})" for n, p in self.cfg.profiles.items())
             self.add_block(command, "Доступные модели", names)
@@ -683,6 +705,10 @@ class App:
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
                       "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: свернуть/развернуть  /help")
+            if self.scroll_debug and not self.paste_feedback:
+                status = (f" скролл: колесо={self.scroll_wheel_events} "
+                          f"стрелки={self.scroll_arrow_events} "
+                          f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
             self._line(stdscr, next_row, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
