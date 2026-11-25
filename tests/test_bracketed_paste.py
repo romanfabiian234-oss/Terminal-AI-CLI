@@ -39,7 +39,7 @@ class PasteTests(unittest.TestCase):
         with patch("terminal_ai.ui.curses.color_pair", side_effect=lambda index: index * 256):
             app.render(screen)
         visible = [part for _, _, part, _ in screen.writes]
-        self.assertIn("MacBook-Air-Fabiian ~/Terminal-AI-CLI- % pwd", visible) if app.cwd.name == "Terminal-AI-CLI-" else self.assertTrue(any(part.endswith(" % pwd") for part in visible))
+        self.assertTrue(any(part.startswith("MacBook-Air-Fabiian ") and part.endswith(" % pwd") for part in visible))
         self.assertIn("  2. whoami", visible)
         self.assertIn("  3. date", visible)
         self.assertIn("  4. ls", visible)
