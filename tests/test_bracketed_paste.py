@@ -69,6 +69,8 @@ class PasteTests(unittest.TestCase):
 
     def test_small_window_keeps_prompt_and_preview_summary(self):
         from test_appearance import FakeWindow
+        self.app.hostname = "mac"
+        self.app.cwd = Path.home()
         for key in "\x1b[200~" + "\n".join(f"echo {i}" for i in range(12)) + "\x1b[201~":
             self.app.key(key, 7, 45)
         screen = FakeWindow(7, 45)
