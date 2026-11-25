@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_read_command
 from .session import PersistentShell
+from .paste import PasteDecoder, prepare_pasted_commands
 
 
 # The xterm alternate screen separates the TUI from regular shell scrollback.
@@ -56,6 +57,12 @@ def enable_mouse_wheel() -> None:
             curses.mousemask(wheel)
     except (curses.error, AttributeError):
         pass
+
+
+def set_bracketed_paste(enabled: bool) -> None:
+    """Tell the terminal to mark pasted text instead of sending bare newlines."""
+    if os.isatty(sys.stdout.fileno()):
+        os.write(sys.stdout.fileno(), b"\x1b[?2004h" if enabled else b"\x1b[?2004l")
 
 
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
@@ -141,6 +148,9 @@ class App:
         self.next_id = 1
         self.line = ""
         self.pending: deque[str] = deque()
+        self.paste_decoder = PasteDecoder()
+        self.paste_review: deque[str] = deque()
+        self.paste_feedback = ""
         self.direct_input = False  # Ctrl+G enables stdin forwarding for interactive commands.
         self.history: list[str] = []
         self.hist_pos = 0
@@ -387,7 +397,38 @@ class App:
                 self.start(command, self.last_rows, self.last_cols)
         return changed
 
+    def _stage_paste(self, text: str) -> None:
+        """Stage clipboard commands for manual Enter approval one by one."""
+        if self.active and self.direct_input:
+            # The user explicitly enabled stdin passthrough with Ctrl+G.
+            self._send(text.encode("utf-8", "replace"))
+            return
+        if self.paste_review:
+            self.paste_feedback = "Сначала подтверди или отмени предыдущую вставку (Ctrl+C)."
+            return
+        try:
+            commands = prepare_pasted_commands(text, self.line)
+        except ValueError as exc:
+            self.paste_feedback = str(exc)
+            return
+        if not commands:
+            return
+        self.line = commands[0]
+        self.paste_review.extend(commands[1:])
+        self.paste_feedback = f"Вставлено {len(commands)} команд: Enter — выполнить одну; Ctrl+C — отменить."
+
     def key(self, key: str | int, rows: int, cols: int) -> None:
+        # Bracketed paste is not a sequence of Enter keypresses. Never execute
+        # text received between ESC[200~ and ESC[201~.
+        for event, value in self.paste_decoder.feed(key):
+            if event == "paste":
+                self._stage_paste(value)
+            elif event == "error":
+                self.paste_feedback = str(value)
+            else:
+                self._key(value, rows, cols)
+
+    def _key(self, key: str | int, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
         if key == curses.KEY_MOUSE:
             try:
@@ -419,6 +460,9 @@ class App:
             return
         if key == "\x03":  # Ctrl+C: stop current process and cancel pending commands.
             self.pending.clear()
+            self.paste_review.clear()
+            self.paste_decoder.reset()
+            self.paste_feedback = ""
             self.line = ""
             if self.active:
                 if self.session is not None:
@@ -445,12 +489,18 @@ class App:
             return
         if key in ("\n", "\r", curses.KEY_ENTER):
             command = self.line.strip()
-            self.line = ""
             if not command:
                 return
             if len(self.pending) >= 32:
-                self.add_block(command, "Очередь заполнена", "Допускается до 32 команд в ожидании.", "error")
+                self.paste_feedback = "Очередь заполнена. Дождись завершения команд."
                 return
+            # Only a real Enter here approves this command. Pasted newlines
+            # never reach this branch, even with an active shell process.
+            self.line = self.paste_review.popleft() if self.paste_review else ""
+            self.paste_feedback = (
+                f"Осталось {len(self.paste_review) + 1} команд: Enter — следующая; Ctrl+C — отменить."
+                if self.line else ""
+            )
             self.history.append(command)
             self.hist_pos = len(self.history)
             self.pending.append(command)
@@ -598,9 +648,10 @@ class App:
         if not self.direct_input:
             prompt += self.line
         self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
-        if viewport and prompt_y + 1 < h:
+        if (viewport or self.paste_feedback) and prompt_y + 1 < h:
             mode = "session" if self.session is not None else "isolated"
-            status = (f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
+            status = (self.paste_feedback or
+                      f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
                       "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help")
             self._line(stdscr, prompt_y + 1, 0, status, curses.color_pair(4))
         if not self.direct_input:
@@ -664,6 +715,7 @@ def run_ui(config: Config) -> None:
         # curses.wrapper has already entered the alternate screen. Do not
         # manually re-enter it; xterm screen switching is not nestable.
         enable_mouse_wheel()
+        set_bracketed_paste(True)
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(65)
@@ -687,6 +739,7 @@ def run_ui(config: Config) -> None:
                             curses.mousemask(0)
                         except curses.error:
                             pass
+                        set_bracketed_paste(False)
                         curses.endwin()  # Release curses' screen before the child starts.
                         child_command = fullscreen_launch_command(command)
                         inline_screen = codex_inline_screen(child_command)
@@ -711,11 +764,13 @@ def run_ui(config: Config) -> None:
                             # Restore curses only after Codex leaves its own screen.
                             curses.reset_prog_mode()
                             enable_mouse_wheel()
+                            set_bracketed_paste(True)
                             stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
                 app.render(stdscr)
         finally:
+            set_bracketed_paste(False)
             try:
                 curses.mousemask(0)
             except curses.error:
