@@ -14,10 +14,12 @@ class SGRWheelDecoder:
     def __init__(self) -> None:
         self.buffer = ""
         self.discard = False
+        self.drop_remaining = False
 
     def reset(self) -> None:
         self.buffer = ""
         self.discard = False
+        self.drop_remaining = False
 
     def feed(self, key: str | int) -> list[tuple[str, str | int]]:
         if isinstance(key, int):
@@ -25,6 +27,13 @@ class SGRWheelDecoder:
             return [("key", key)]
         results: list[tuple[str, str | int]] = []
         for char in key:
+            if self.drop_remaining:
+                if char in "Mm\r\n":
+                    self.reset()
+                elif char == "\x1b":
+                    self.reset()
+                    self.buffer = char
+                continue
             if not self.buffer:
                 if char == "\x1b":
                     self.buffer = char
@@ -61,8 +70,13 @@ class SGRWheelDecoder:
                     if not (char.isascii() and (char.isdigit() or char == ";")):
                         self.discard = True
                     continue
-                # Malformed mouse packet: never add it to the command input.
-                self.reset()
+                # Overlong packets are discarded through the final M/m so
+                # trailing digits cannot leak into the command input.
+                if len(candidate) >= self.MAX_SEQUENCE:
+                    self.buffer = ""
+                    self.drop_remaining = True
+                else:
+                    self.reset()
                 continue
             # Not a mouse packet: replay the complete sequence for bracketed
             # paste or normal input. The paste decoder handles its own escapes.
