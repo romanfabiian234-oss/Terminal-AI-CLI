@@ -78,6 +78,41 @@ class ShellAppearance(unittest.TestCase):
         joined = '\n'.join(s for _, _, s, _ in screen.writes)
         self.assertIn('qwen3.5:2b (home) · ответ за 1.23 с', joined)
 
+
+    def test_long_output_visible_and_scrollable_without_ctrl_t(self):
+        screen = FakeWindow(24, 90)
+        b = self.app.add_block('seq 1 150', 'Команда завершилась', 'Выведены числа от 1 до 150')
+        b.output.feed(('\n'.join(str(i) for i in range(1, 151)) + '\n').encode())
+        b.finish(0)
+        self.assertTrue(b.expanded)
+        self.assertEqual(len(b.output.snapshot()), 150)
+        self.render(screen)
+        bottom_view = '\n'.join(text for _, _, text, _ in screen.writes)
+        self.assertIn('150', bottom_view)
+        self.assertNotIn('+147 строк', bottom_view)
+        for _ in range(20):
+            self.app.key(curses.KEY_PPAGE, 24, 90)
+        self.render(screen)
+        top_view = '\n'.join(text for _, _, text, _ in screen.writes)
+        self.assertNotEqual(top_view, bottom_view)
+        self.assertTrue(any(text.strip() == '1' for _, _, text, _ in screen.writes))
+        self.assertIsNotNone(screen.cursor)
+
+    def test_ctrl_t_now_collapses_and_reopens_output(self):
+        b = self.app.add_block('seq 1 150', 'Команда завершилась', 'Выведены числа от 1 до 150')
+        b.output.feed(('\n'.join(str(i) for i in range(1, 151)) + '\n').encode())
+        b.finish(0)
+        self.assertTrue(b.expanded)
+        self.app.key('\x14', 24, 90)
+        self.assertFalse(b.expanded)
+        screen = FakeWindow(24, 90)
+        self.render(screen)
+        self.assertTrue(any('+147 строк' in text for _, _, text, _ in screen.writes))
+        self.app.key('\x14', 24, 90)
+        self.assertTrue(b.expanded)
+        self.render(screen)
+        self.assertFalse(any('+147 строк' in text for _, _, text, _ in screen.writes))
+
     def test_full_height_keeps_input_visible_and_no_header(self):
         screen = FakeWindow(12, 90)
         b = self.app.add_block('seq 1 90', 'Выполняется команда', '')

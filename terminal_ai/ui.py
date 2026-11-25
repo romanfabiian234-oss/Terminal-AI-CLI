@@ -671,7 +671,7 @@ class App:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
-                      "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help")
+                      "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: свернуть/развернуть  /help")
             self._line(stdscr, next_row, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
