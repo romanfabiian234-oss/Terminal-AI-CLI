@@ -75,6 +75,49 @@ class MouseScrollTests(unittest.TestCase):
             self.assertLess(self.app.scroll, top)
             self.assertIsNotNone(bigger_window.cursor)
 
+    def test_arrow_key_wheel_fallback_moves_timeline_with_empty_prompt(self):
+        block = self.app.add_block("seq 1 150", "Готово", "Числа")
+        block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
+        block.finish(0)
+        self.app.line = ""
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+            self.app.key(curses.KEY_UP, 24, 100)
+            self.app.render(screen)
+            self.assertEqual(self.app.scroll, wheel_scroll_step(24))
+            self.assertEqual(self.app.scroll_arrow_events, 1)
+            self.app.key(curses.KEY_DOWN, 24, 100)
+            self.app.render(screen)
+            self.assertEqual(self.app.scroll, 0)
+
+    def test_typed_prompt_keeps_arrow_history_and_ctrl_p_n_replaces_it(self):
+        self.app.history = ["pwd", "whoami"]
+        self.app.hist_pos = 2
+        self.app.line = "draft command"
+        self.app.key(curses.KEY_UP, 24, 100)
+        self.assertEqual(self.app.line, "whoami")
+        self.app.line = ""
+        self.app.key("\x10", 24, 100)
+        self.assertEqual(self.app.line, "pwd")
+        self.app.key("\x0e", 24, 100)
+        self.assertEqual(self.app.line, "whoami")
+
+    def test_scroll_debug_shows_actual_input_counters(self):
+        block = self.app.add_block("seq", "Готово", "Числа")
+        block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
+        block.finish(0)
+        self.app.meta("/scroll-debug on")
+        self.app.key(curses.KEY_UP, 24, 100)
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        status = "\n".join(x[2] for x in screen.writes)
+        self.assertIn("стрелки=1", status)
+        self.assertIn("колесо=0", status)
+        self.app.meta("/scroll-debug off")
+        self.assertFalse(self.app.scroll_debug)
+
     def test_mouse_failure_and_other_buttons_do_not_change_input(self):
         with patch('terminal_ai.ui.curses.getmouse', side_effect=curses.error):
             self.app.key(curses.KEY_MOUSE, 24, 100)
