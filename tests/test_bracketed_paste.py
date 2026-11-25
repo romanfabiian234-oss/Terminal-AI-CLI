@@ -28,6 +28,59 @@ class PasteTests(unittest.TestCase):
                              ["pwd", "whoami", "date", "ls"])
             self.assertFalse(self.app.paste_review)
 
+
+    def test_pasted_commands_are_all_visible_before_approval(self):
+        from test_appearance import FakeWindow
+        app = self.app
+        app.hostname = "MacBook-Air-Fabiian"
+        for key in "\x1b[200~pwd\nwhoami\ndate\nls\n\x1b[201~":
+            app.key(key, 24, 100)
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", side_effect=lambda index: index * 256):
+            app.render(screen)
+        visible = [part for _, _, part, _ in screen.writes]
+        self.assertTrue(any(part.startswith("MacBook-Air-Fabiian ") and part.endswith(" % pwd") for part in visible))
+        self.assertIn("  2. whoami", visible)
+        self.assertIn("  3. date", visible)
+        self.assertIn("  4. ls", visible)
+        self.assertFalse(app.blocks)
+        self.assertFalse(app.pending)
+
+    def test_preview_updates_after_approving_one_and_canceling_rest(self):
+        from test_appearance import FakeWindow
+        with patch.object(self.app, "start") as start:
+            for key in "\x1b[200~pwd\nwhoami\ndate\nls\x1b[201~":
+                self.app.key(key, 24, 90)
+            self.app.key("\n", 24, 90)
+            start.assert_called_once()
+            screen = FakeWindow(24, 90)
+            with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+                self.app.render(screen)
+            visible = [part for _, _, part, _ in screen.writes]
+            self.assertTrue(any(part.endswith(" % whoami") for part in visible))
+            self.assertIn("  2. date", visible)
+            self.assertIn("  3. ls", visible)
+            self.assertNotIn("  2. whoami", visible)
+            self.app.key("\x03", 24, 90)
+            screen = FakeWindow(24, 90)
+            with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+                self.app.render(screen)
+            self.assertFalse(any("  2. date" in part or "  3. ls" in part for _, _, part, _ in screen.writes))
+
+    def test_small_window_keeps_prompt_and_preview_summary(self):
+        from test_appearance import FakeWindow
+        self.app.hostname = "mac"
+        self.app.cwd = Path.home()
+        for key in "\x1b[200~" + "\n".join(f"echo {i}" for i in range(12)) + "\x1b[201~":
+            self.app.key(key, 7, 45)
+        screen = FakeWindow(7, 45)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        lines = [part for _, _, part, _ in screen.writes]
+        self.assertTrue(any(" % echo 0" in part for part in lines))
+        self.assertTrue(any("ещё" in part for part in lines))
+        self.assertIsNotNone(screen.cursor)
+
     def test_single_line_paste_also_waits_for_enter(self):
         with patch.object(self.app, "start") as start:
             for key in "\x1b[200~echo HELLO\x1b[201~":

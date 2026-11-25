@@ -630,9 +630,19 @@ class App:
                                  curses.color_pair(4), False))
             viewport.append(("", 0, False))
 
-        # Like a shell: prompt follows the last block, moving to the bottom only
-        # when content needs more vertical space. No permanent header or separator.
-        prompt_y = min(h - 2, len(viewport)) if viewport else 0
+        # Show every queued pasted command below the editable prompt when room
+        # permits. Reserve vertical space rather than obscuring the history or
+        # pretending that the pasted newlines were already confirmed.
+        review = list(self.paste_review)
+        preview_slots = max(0, h - 4)
+        visible_count = min(len(review), preview_slots)
+        if len(review) > preview_slots:
+            visible_count = max(0, preview_slots - 1)  # Summary row for the rest.
+        remaining = len(review) - visible_count
+        footer = bool(viewport or self.paste_feedback)
+        reserved = visible_count + (1 if remaining else 0) + int(footer)
+        # Like a shell, the prompt follows the timeline, with room for review.
+        prompt_y = min(max(0, h - 1 - reserved), len(viewport)) if viewport else 0
         start = max(0, len(viewport) - prompt_y - self.scroll)
         for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
             if success and line.startswith("✓ "):
@@ -648,12 +658,21 @@ class App:
         if not self.direct_input:
             prompt += self.line
         self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
-        if (viewport or self.paste_feedback) and prompt_y + 1 < h:
+        # The first pasted command remains editable in the real prompt.
+        # Display the rest as a numbered preview: nothing runs until Enter.
+        next_row = prompt_y + 1
+        for idx, command in enumerate(review[:visible_count], start=2):
+            self._line(stdscr, next_row, 0, f"  {idx}. {command}", curses.color_pair(4))
+            next_row += 1
+        if remaining:
+            self._line(stdscr, next_row, 0, f"  … ещё {remaining} команд", curses.color_pair(4))
+            next_row += 1
+        if footer and next_row < h:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
                       "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: детали  /help")
-            self._line(stdscr, prompt_y + 1, 0, status, curses.color_pair(4))
+            self._line(stdscr, next_row, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
             try:
