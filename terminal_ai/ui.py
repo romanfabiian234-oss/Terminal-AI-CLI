@@ -20,6 +20,7 @@ from pathlib import Path
 from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_read_command
 from .session import PersistentShell
 from .paste import PasteDecoder, prepare_pasted_commands
+from .wheel import SGRWheelDecoder
 
 
 # The xterm alternate screen separates the TUI from regular shell scrollback.
@@ -57,6 +58,33 @@ def enable_mouse_wheel() -> None:
             curses.mousemask(wheel)
     except (curses.error, AttributeError):
         pass
+
+
+def configure_mouse(enabled: bool) -> bool:
+    """Use native curses wheel on modern builds, SGR reports on older macOS.
+
+    Older Apple curses lacks BUTTON5_PRESSED, so the normal native mask
+    cannot request scrolling down. SGR encodes wheel up/down as 64/65.
+    Returns True only when the raw SGR decoder should be used.
+    """
+    if getattr(curses, "BUTTON5_PRESSED", None) is not None:
+        if enabled:
+            enable_mouse_wheel()
+        else:
+            try:
+                curses.mousemask(0)
+            except curses.error:
+                pass
+        return False
+    try:
+        curses.mousemask(0)  # Avoid two competing mouse decoders.
+    except curses.error:
+        pass
+    if not os.isatty(sys.stdout.fileno()):
+        return False
+    os.write(sys.stdout.fileno(),
+             b"\x1b[?1006h\x1b[?1000h" if enabled else b"\x1b[?1000l\x1b[?1006l")
+    return enabled
 
 
 def set_bracketed_paste(enabled: bool) -> None:
@@ -427,6 +455,16 @@ class App:
         self.paste_review.extend(commands[1:])
         self.paste_feedback = f"Вставлено {len(commands)} команд: Enter — выполнить одну; Ctrl+C — отменить."
 
+    def scroll_wheel(self, direction: str, rows: int) -> None:
+        step = wheel_scroll_step(rows)
+        if direction == "up":
+            self.scroll += step
+        elif direction == "down":
+            self.scroll = max(0, self.scroll - step)
+        else:
+            return
+        self.scroll_wheel_events += 1
+
     def key(self, key: str | int, rows: int, cols: int) -> None:
         # Bracketed paste is not a sequence of Enter keypresses. Never execute
         # text received between ESC[200~ and ESC[201~.
@@ -443,13 +481,10 @@ class App:
         if key == curses.KEY_MOUSE:
             try:
                 _, _, _, _, buttons = curses.getmouse()
-                step = wheel_scroll_step(rows)
                 if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
-                    self.scroll += step
-                    self.scroll_wheel_events += 1
-                if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
-                    self.scroll = max(0, self.scroll - step)
-                    self.scroll_wheel_events += 1
+                    self.scroll_wheel("up", rows)
+                elif buttons & getattr(curses, "BUTTON5_PRESSED", 0):
+                    self.scroll_wheel("down", rows)
             except curses.error:
                 pass
             return
@@ -770,7 +805,8 @@ def run_ui(config: Config) -> None:
         configure_colors(bg)
         # curses.wrapper has already entered the alternate screen. Do not
         # manually re-enter it; xterm screen switching is not nestable.
-        enable_mouse_wheel()
+        raw_sgr = configure_mouse(True)
+        wheel_decoder = SGRWheelDecoder()
         set_bracketed_paste(True)
         curses.curs_set(1)
         stdscr.keypad(True)
@@ -780,7 +816,14 @@ def run_ui(config: Config) -> None:
                 h, w = stdscr.getmaxyx()
                 try:
                     key = stdscr.get_wch()
-                    app.key(key, h, w)
+                    if raw_sgr:
+                        for kind, value in wheel_decoder.feed(key):
+                            if kind == "wheel":
+                                app.scroll_wheel(str(value), h)
+                            else:
+                                app.key(value, h, w)
+                    else:
+                        app.key(key, h, w)
                 except curses.error:
                     pass
                 app.poll()
@@ -790,11 +833,9 @@ def run_ui(config: Config) -> None:
                     if command:
                         from .raw import run_raw_command
                         b = app.add_block(command, "Интерактивная программа", "Открыта в полном терминале.", "running")
-                        # Let full-screen children manage their own mouse input.
-                        try:
-                            curses.mousemask(0)
-                        except curses.error:
-                            pass
+                        # Release mouse reporting before Codex/Vim takes over.
+                        configure_mouse(False)
+                        wheel_decoder.reset()
                         set_bracketed_paste(False)
                         curses.endwin()  # Release curses' screen before the child starts.
                         child_command = fullscreen_launch_command(command)
@@ -819,18 +860,16 @@ def run_ui(config: Config) -> None:
                                 child_screen(False)
                             # Restore curses only after Codex leaves its own screen.
                             curses.reset_prog_mode()
-                            enable_mouse_wheel()
+                            raw_sgr = configure_mouse(True)
+                            wheel_decoder.reset()
                             set_bracketed_paste(True)
                             stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
                 app.render(stdscr)
         finally:
+            configure_mouse(False)
             set_bracketed_paste(False)
-            try:
-                curses.mousemask(0)
-            except curses.error:
-                pass
             app.stop()
 
     curses.wrapper(main)
