@@ -65,6 +65,11 @@ def set_bracketed_paste(enabled: bool) -> None:
         os.write(sys.stdout.fileno(), b"\x1b[?2004h" if enabled else b"\x1b[?2004l")
 
 
+def wheel_scroll_step(rows: int) -> int:
+    """Move faster in larger terminals without jumping entire pages."""
+    return max(5, min(12, rows // 6))
+
+
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
                             "server", "ai", "explain", "language", "expand", "clear", "raw"})
 
@@ -433,10 +438,11 @@ class App:
         if key == curses.KEY_MOUSE:
             try:
                 _, _, _, _, buttons = curses.getmouse()
+                step = wheel_scroll_step(rows)
                 if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
-                    self.scroll += 3
+                    self.scroll += step
                 if buttons & getattr(curses, "BUTTON5_PRESSED", 0):
-                    self.scroll = max(0, self.scroll - 3)
+                    self.scroll = max(0, self.scroll - step)
             except curses.error:
                 pass
             return
@@ -643,7 +649,12 @@ class App:
         reserved = visible_count + (1 if remaining else 0) + int(footer)
         # Like a shell, the prompt follows the timeline, with room for review.
         prompt_y = min(max(0, h - 1 - reserved), len(viewport)) if viewport else 0
-        start = max(0, len(viewport) - prompt_y - self.scroll)
+        # Clamp at the real content boundary. Previously self.scroll kept
+        # growing after the first line, so downward wheel events appeared stuck
+        # until that invisible overscroll had been consumed.
+        max_scroll = max(0, len(viewport) - prompt_y)
+        self.scroll = min(max_scroll, max(0, self.scroll))
+        start = max_scroll - self.scroll
         for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
             if success and line.startswith("✓ "):
                 self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)

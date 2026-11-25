@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from terminal_ai.core import load_config
-from terminal_ai.ui import App, enable_mouse_wheel, enter_app_screen
+from terminal_ai.ui import App, enable_mouse_wheel, enter_app_screen, wheel_scroll_step
+from test_appearance import FakeWindow
 
 
 class MouseScrollTests(unittest.TestCase):
@@ -16,11 +17,63 @@ class MouseScrollTests(unittest.TestCase):
     def test_wheel_up_and_down_navigate_block_timeline(self):
         with patch('terminal_ai.ui.curses.getmouse', return_value=(0, 10, 10, 0, curses.BUTTON4_PRESSED)):
             self.app.key(curses.KEY_MOUSE, 24, 100)
-        self.assertEqual(self.app.scroll, 3)
+        self.assertEqual(self.app.scroll, wheel_scroll_step(24))
         with patch('terminal_ai.ui.curses.getmouse', return_value=(0, 10, 10, 0, curses.BUTTON5_PRESSED)):
             self.app.key(curses.KEY_MOUSE, 24, 100)
         self.assertEqual(self.app.scroll, 0)
         self.assertEqual(self.app.line, 'draft command')
+
+    def test_wheel_speed_scales_with_terminal_height(self):
+        self.assertEqual(wheel_scroll_step(24), 5)
+        self.assertEqual(wheel_scroll_step(60), 10)
+        self.assertEqual(wheel_scroll_step(120), 12)
+
+    def test_overscrolling_top_never_makes_scrolling_down_stick(self):
+        block = self.app.add_block("seq 1 150", "Готово", "Числа от 1 до 150")
+        block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
+        block.finish(0)
+        window = FakeWindow(16, 100)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(window)
+            # Repeated upward gestures past the first row used to accumulate an
+            # invisible overscroll counter, freezing the next downward gestures.
+            with patch("terminal_ai.ui.curses.getmouse",
+                       return_value=(0, 1, 1, 0, curses.BUTTON4_PRESSED)):
+                for _ in range(75):
+                    self.app.key(curses.KEY_MOUSE, 16, 100)
+                    self.app.render(window)
+            top_offset = self.app.scroll
+            self.assertGreater(top_offset, 0)
+            self.assertIn("Готово", "\n".join(x[2] for x in window.writes))
+            # One downward event must move immediately, not eat a stale offset.
+            with patch("terminal_ai.ui.curses.getmouse",
+                       return_value=(0, 1, 1, 0, curses.BUTTON5_PRESSED)):
+                self.app.key(curses.KEY_MOUSE, 16, 100)
+            self.app.render(window)
+            self.assertEqual(self.app.scroll, top_offset - wheel_scroll_step(16))
+            self.assertEqual(self.app.line, "draft command")
+            self.assertIsNotNone(window.cursor)
+
+    def test_page_up_overscroll_and_resize_are_clamped(self):
+        block = self.app.add_block("seq 1 150", "Готово", "Числа от 1 до 150")
+        block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
+        block.finish(0)
+        window = FakeWindow(15, 100)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(window)
+            for _ in range(100):
+                self.app.key(curses.KEY_PPAGE, 15, 100)
+            self.app.render(window)
+            top = self.app.scroll
+            self.app.key(curses.KEY_NPAGE, 15, 100)
+            self.app.render(window)
+            self.assertLess(self.app.scroll, top)
+            # A bigger window shortens the history's scroll range.
+            self.app.scroll = 10000
+            bigger_window = FakeWindow(65, 100)
+            self.app.render(bigger_window)
+            self.assertLess(self.app.scroll, top)
+            self.assertIsNotNone(bigger_window.cursor)
 
     def test_mouse_failure_and_other_buttons_do_not_change_input(self):
         with patch('terminal_ai.ui.curses.getmouse', side_effect=curses.error):
