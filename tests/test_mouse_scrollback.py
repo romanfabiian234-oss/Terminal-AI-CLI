@@ -108,6 +108,7 @@ class MouseScrollTests(unittest.TestCase):
         block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
         block.finish(0)
         self.app.meta("/scroll-debug on")
+        self.app.line = ""
         self.app.key(curses.KEY_UP, 24, 100)
         screen = FakeWindow(24, 100)
         with patch("terminal_ai.ui.curses.color_pair", return_value=0):
