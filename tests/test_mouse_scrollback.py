@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from terminal_ai.core import load_config
-from terminal_ai.ui import App, enable_mouse_wheel, enter_app_screen, wheel_scroll_step
+from terminal_ai.ui import App, enable_mouse_wheel, enter_app_screen
 from test_appearance import FakeWindow
 
 
@@ -19,16 +19,19 @@ class MouseScrollTests(unittest.TestCase):
     def test_wheel_up_and_down_navigate_block_timeline(self):
         with patch('terminal_ai.ui.curses.getmouse', return_value=(0, 10, 10, 0, curses.BUTTON4_PRESSED)):
             self.app.key(curses.KEY_MOUSE, 24, 100)
-        self.assertEqual(self.app.scroll, wheel_scroll_step(24))
+        self.assertEqual(self.app.scroll_target, 1)
+        self.app.advance_scroll(100, now=1.0)
+        self.assertEqual(self.app.scroll, 1)
         with patch('terminal_ai.ui.curses.getmouse', return_value=(0, 10, 10, 0, curses.BUTTON5_PRESSED)):
             self.app.key(curses.KEY_MOUSE, 24, 100)
+        self.app.advance_scroll(100, now=1.1)
         self.assertEqual(self.app.scroll, 0)
         self.assertEqual(self.app.line, 'draft command')
 
     def test_wheel_speed_scales_with_terminal_height(self):
-        self.assertEqual(wheel_scroll_step(24), 5)
-        self.assertEqual(wheel_scroll_step(60), 10)
-        self.assertEqual(wheel_scroll_step(120), 12)
+        self.app.scroll_wheel("up", 24)
+        self.assertEqual(self.app.scroll_target, 1)
+        self.assertEqual(self.app.scroll, 0)
 
     @unittest.skipUnless(getattr(curses, "BUTTON5_PRESSED", None),
                          "Native button 5 absent; SGR fallback has separate tests")
@@ -39,22 +42,17 @@ class MouseScrollTests(unittest.TestCase):
         window = FakeWindow(16, 100)
         with patch("terminal_ai.ui.curses.color_pair", return_value=0):
             self.app.render(window)
-            # Repeated upward gestures past the first row used to accumulate an
-            # invisible overscroll counter, freezing the next downward gestures.
-            with patch("terminal_ai.ui.curses.getmouse",
-                       return_value=(0, 1, 1, 0, curses.BUTTON4_PRESSED)):
-                for _ in range(75):
-                    self.app.key(curses.KEY_MOUSE, 16, 100)
-                    self.app.render(window)
+            for _ in range(300):
+                self.app.scroll_wheel("up", 16)
+            for frame in range(1, 180):
+                self.app.advance_scroll(500, now=frame * 0.025)
+            self.app.render(window)  # Clamp target to the real boundary.
             top_offset = self.app.scroll
             self.assertGreater(top_offset, 0)
             self.assertIn("Готово", "\n".join(x[2] for x in window.writes))
-            # One downward event must move immediately, not eat a stale offset.
-            with patch("terminal_ai.ui.curses.getmouse",
-                       return_value=(0, 1, 1, 0, curses.BUTTON5_PRESSED)):
-                self.app.key(curses.KEY_MOUSE, 16, 100)
-            self.app.render(window)
-            self.assertEqual(self.app.scroll, top_offset - wheel_scroll_step(16))
+            self.app.scroll_wheel("down", 16)
+            self.app.advance_scroll(top_offset, now=10.0)
+            self.assertEqual(self.app.scroll, top_offset - 1)
             self.assertEqual(self.app.line, "draft command")
             self.assertIsNotNone(window.cursor)
 
@@ -88,10 +86,12 @@ class MouseScrollTests(unittest.TestCase):
         with patch("terminal_ai.ui.curses.color_pair", return_value=0):
             self.app.render(screen)
             self.app.key(curses.KEY_UP, 24, 100)
+            self.app.advance_scroll(150, now=1.0)
             self.app.render(screen)
-            self.assertEqual(self.app.scroll, wheel_scroll_step(24))
+            self.assertEqual(self.app.scroll, 1)
             self.assertEqual(self.app.scroll_arrow_events, 1)
             self.app.key(curses.KEY_DOWN, 24, 100)
+            self.app.advance_scroll(150, now=1.1)
             self.app.render(screen)
             self.assertEqual(self.app.scroll, 0)
 
@@ -131,6 +131,8 @@ class MouseScrollTests(unittest.TestCase):
         self.assertEqual(self.app.scroll, 0)
         self.assertEqual(self.app.line, 'draft command')
 
+    @unittest.skipUnless(getattr(curses, "BUTTON5_PRESSED", None),
+                         "Native BUTTON5 unavailable; use SGR fallback")
     def test_wheel_registration_does_not_capture_clicks_or_drag(self):
         with patch('terminal_ai.ui.curses.mouseinterval') as interval, patch('terminal_ai.ui.curses.mousemask') as mask:
             enable_mouse_wheel()
