@@ -367,6 +367,16 @@ class CompletionPopupTests(unittest.TestCase):
             self.assertFalse(self.app._completion_suppressed)
             start.assert_not_called()
 
+    def test_inshellisense_folder_without_slash_is_opened_as_path(self):
+        self.app.line = "python3 "
+        self.app.suggestions = (Completion("reports", "reports", "folder"),)
+        with patch.object(self.app, "start") as start:
+            self.app.key("\t", 24, 100)
+            self.assertEqual(self.app.line, "python3 reports/")
+            self.assertFalse(self.app._completion_suppressed)
+            self.assertEqual(self.app._completion_input, "")
+            start.assert_not_called()
+
     def test_tab_on_file_keeps_popup_closed(self):
         self.app.line = "python3 "
         self.app.suggestions = (Completion("runner.py", "runner.py", "file"),)
