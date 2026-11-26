@@ -734,6 +734,8 @@ class App:
                 if self.line else ""
             )
             self.history.append(command)
+            if len(self.history) > 1000:
+                del self.history[:-1000]  # Keep long sessions bounded in RAM.
             self.hist_pos = len(self.history)
             self.pending.append(command)
             self._run_pending()
