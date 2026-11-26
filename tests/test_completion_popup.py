@@ -305,6 +305,20 @@ class CompletionPopupTests(unittest.TestCase):
         selected = next(item for item in screen.writes if "› git" in item[2])
         self.assertEqual(selected[3], 256 | curses.A_REVERSE)
 
+    def test_home_location_suffix_is_hidden_only_in_popup(self):
+        home = Completion("Домой (~/)", "~/", "folder")
+        desktop = Completion("Desktop (~/)", "~/Desktop/", "folder")
+        self.app.line = "cd "
+        self.app.suggestions = (home, desktop)
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", side_effect=lambda v: v * 256):
+            self.app.render(screen)
+        content = "".join(line for _, _, line, _ in screen.writes)
+        self.assertIn("▱ Домой", content)
+        self.assertIn("▱ Desktop", content)
+        self.assertNotIn("(~/)", content)
+        self.assertEqual(replace_completion("cd ", desktop), "cd ~/Desktop/")
+
     def test_arrows_select_and_tab_inserts_without_executing(self):
         self.app.line = "gi"
         self.app.suggestions = (Completion("git", "git", "command"),
