@@ -121,6 +121,9 @@ class MouseScrollTests(unittest.TestCase):
         status = "\n".join(x[2] for x in screen.writes)
         self.assertIn("стрелки=1", status)
         self.assertIn("колесо=0", status)
+        # Diagnostics must remain visible while the normal prompt scrolls away.
+        self.assertTrue(any(y == 23 and "стрелки=1" in text
+                            for y, _, text, _ in screen.writes))
         self.app.meta("/scroll-debug off")
         self.assertFalse(self.app.scroll_debug)
 
