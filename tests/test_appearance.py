@@ -16,6 +16,7 @@ class FakeWindow:
         self.height, self.width = height, width
         self.writes: list[tuple[int, int, str, int]] = []
         self.cursor: tuple[int, int] | None = None
+        self.redraw_count = 0
 
     def getmaxyx(self):
         return self.height, self.width
@@ -31,6 +32,9 @@ class FakeWindow:
 
     def refresh(self):
         pass
+
+    def redrawwin(self):
+        self.redraw_count += 1
 
 
 class ShellAppearance(unittest.TestCase):
@@ -48,8 +52,8 @@ class ShellAppearance(unittest.TestCase):
         screen = FakeWindow()
         self.render(screen)
         self.assertFalse(self.app.blocks)
-        self.assertEqual(screen.writes, [(0, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
-        self.assertEqual(screen.cursor, (0, len('MacBook-Air-Fabiian ~ % ')))
+        self.assertEqual(screen.writes, [(23, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
+        self.assertEqual(screen.cursor, (23, len('MacBook-Air-Fabiian ~ % ')))
 
     def test_blocks_are_inserted_above_following_prompt(self):
         screen = FakeWindow()
@@ -59,13 +63,54 @@ class ShellAppearance(unittest.TestCase):
         self.render(screen)
         texts = [(y, x, s, attr) for y, x, s, attr in screen.writes]
         self.assertFalse(any('Terminal AI CLI' in s for _, _, s, _ in texts))
-        self.assertEqual([(y, attr) for y, _, s, attr in texts if s == '✓'], [(0, 512 | curses.A_BOLD)])
         heading = next((y, attr) for y, x, s, attr in texts if 'Команда завершилась' in s)
-        self.assertEqual(heading[0], 0)
         self.assertEqual(heading[1], 1280 | curses.A_BOLD)
+        self.assertEqual([(y, attr) for y, _, s, attr in texts if s == '✓'],
+                         [(heading[0], 512 | curses.A_BOLD)])
         prompt_line = next(y for y, _, s, _ in texts if s.startswith('MacBook-Air-Fabiian '))
-        self.assertLess(prompt_line, screen.height - 2)
+        self.assertEqual(prompt_line, screen.height - 1)
         self.assertEqual(screen.cursor[0], prompt_line)
+        self.assertLess(heading[0], prompt_line - 1)
+        self.assertEqual(max(y for y, _, s, _ in texts if 'hi' in s), prompt_line - 2)
+
+
+    def test_prompt_stays_at_bottom_on_resize_and_during_scrollback(self):
+        b = self.app.add_block('seq 1 90', 'Готово', '')
+        b.output.feed(('\n'.join(map(str, range(1, 91))) + '\n').encode())
+        b.finish(0)
+        for height in (9, 15, 35):
+            screen = FakeWindow(height, 90)
+            self.app.key(curses.KEY_PPAGE, height, 90)
+            self.render(screen)
+            self.assertEqual(screen.cursor[0], height - 1)
+            self.assertTrue(any(y == height - 1 and 'MacBook-Air-Fabiian' in text
+                                for y, _, text, _ in screen.writes))
+            self.assertTrue(all(0 <= y < height for y, _, _, _ in screen.writes))
+
+    def test_external_terminal_clear_forces_repaint_without_erasing_history(self):
+        screen = FakeWindow(24, 100)
+        self.app.line = 'echo still typing'
+        self.app.add_block('pwd', 'Текущая папка', '/tmp')
+        count = len(self.app.blocks)
+        self.render(screen)
+        # Cmd+K is intercepted by Terminal.app: no key reaches App.key().
+        # The next periodic forced redraw must reconstruct the same UI.
+        screen.writes.clear()
+        with patch('terminal_ai.ui.curses.color_pair', side_effect=lambda n: n * 256):
+            self.app.render(screen, force_redraw=True)
+        self.assertEqual(screen.redraw_count, 1)
+        self.assertEqual(len(self.app.blocks), count)
+        self.assertEqual(self.app.line, 'echo still typing')
+        self.assertEqual(screen.cursor[0], screen.height - 1)
+        self.assertTrue(any('Текущая папка' in text for _, _, text, _ in screen.writes))
+        self.assertTrue(any('echo still typing' in text for _, _, text, _ in screen.writes))
+
+    def test_small_window_message_uses_forced_redraw(self):
+        screen = FakeWindow(5, 24)
+        with patch('terminal_ai.ui.curses.color_pair', return_value=0):
+            self.app.render(screen, force_redraw=True)
+        self.assertEqual(screen.redraw_count, 1)
+        self.assertTrue(any('Увеличь окно' in text for _, _, text, _ in screen.writes))
 
     def test_model_name_and_response_time_are_visible(self):
         screen = FakeWindow()
@@ -119,7 +164,7 @@ class ShellAppearance(unittest.TestCase):
         b.output.feed(('\n'.join(map(str, range(90))) + '\n').encode())
         b.expanded = True
         self.render(screen)
-        self.assertEqual(screen.cursor[0], screen.height - 2)
+        self.assertEqual(screen.cursor[0], screen.height - 1)
         self.assertFalse(any('Terminal AI CLI' in s for _, _, s, _ in screen.writes))
 
 
