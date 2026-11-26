@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from terminal_ai.core import load_config
 from terminal_ai.paste import PasteDecoder
-from terminal_ai.ui import App, configure_mouse, wheel_scroll_step
+from terminal_ai.ui import App, configure_mouse
 from terminal_ai.wheel import SGRWheelDecoder
 
 
@@ -72,8 +72,11 @@ class OldMacSGRWheelTests(unittest.TestCase):
     def test_wheel_directions_update_scroll_and_diagnostics(self):
         app = App(load_config(Path("/tmp/terminal-ai-missing-sgr-test")))
         app.scroll_wheel("up", 60)
-        self.assertEqual(app.scroll, wheel_scroll_step(60))
+        self.assertEqual((app.scroll, app.scroll_target), (0, 1))
+        app.advance_scroll(100, now=1.0)
+        self.assertEqual(app.scroll, 1)
         app.scroll_wheel("down", 60)
+        app.advance_scroll(100, now=1.1)
         self.assertEqual(app.scroll, 0)
         self.assertEqual(app.scroll_wheel_events, 2)
 

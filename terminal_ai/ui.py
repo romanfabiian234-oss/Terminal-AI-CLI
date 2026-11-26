@@ -93,9 +93,14 @@ def set_bracketed_paste(enabled: bool) -> None:
         os.write(sys.stdout.fileno(), b"\x1b[?2004h" if enabled else b"\x1b[?2004l")
 
 
-def wheel_scroll_step(rows: int) -> int:
-    """Move faster in larger terminals without jumping entire pages."""
-    return max(5, min(12, rows // 6))
+def smooth_scroll_step(current: int, target: int, last_at: float,
+                       now: float) -> tuple[int, float]:
+    """Advance at most two text rows every 20 ms; no pixel scrolling."""
+    delta = target - current
+    if delta == 0 or now - last_at < 0.02:
+        return current, last_at
+    step = min(abs(delta), 1 if abs(delta) < 6 else 2)
+    return current + (step if delta > 0 else -step), now
 
 
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
@@ -189,6 +194,10 @@ class App:
         self.history: list[str] = []
         self.hist_pos = 0
         self.scroll = 0
+        self.scroll_target: int | None = None
+        self.scroll_direction = ""
+        self.scroll_last_step = 0.0
+        self._cursor_visible: bool | None = None
         # Terminal.app may report alternate-screen wheel gestures as arrows.
         self.scroll_wheel_events = 0
         self.scroll_arrow_events = 0
@@ -210,6 +219,7 @@ class App:
         b.title, b.explanation, b.status = title, message, status
         self.blocks.append(b)
         self.scroll = 0
+        self.scroll_target = None
         return b
 
     def start(self, command: str, rows: int, cols: int) -> None:
@@ -219,6 +229,7 @@ class App:
         self.blocks.append(b)
         self.active = b
         self.scroll = 0
+        self.scroll_target = None
         if self.session is not None:
             try:
                 self.session.send(command)
@@ -452,18 +463,41 @@ class App:
         if not commands:
             return
         self.line = commands[0]
+        self.scroll = 0
+        self.scroll_target = None
         self.paste_review.extend(commands[1:])
         self.paste_feedback = f"Вставлено {len(commands)} команд: Enter — выполнить одну; Ctrl+C — отменить."
 
-    def scroll_wheel(self, direction: str, rows: int) -> None:
-        step = wheel_scroll_step(rows)
-        if direction == "up":
-            self.scroll += step
-        elif direction == "down":
-            self.scroll = max(0, self.scroll - step)
-        else:
+    def _queue_scroll(self, direction: str) -> None:
+        """Change the desired position, not the currently visible row."""
+        if direction not in ("up", "down"):
             return
-        self.scroll_wheel_events += 1
+        # Reverse immediately instead of draining a stale gesture backlog.
+        base = (self.scroll if self.scroll_target is None or
+                direction != self.scroll_direction else self.scroll_target)
+        self.scroll_target = max(0, base + (1 if direction == "up" else -1))
+        self.scroll_direction = direction
+
+    def scroll_wheel(self, direction: str, rows: int) -> None:
+        if direction in ("up", "down"):
+            self._queue_scroll(direction)
+            self.scroll_wheel_events += 1
+
+    def advance_scroll(self, max_scroll: int, now: float | None = None) -> None:
+        self.scroll = min(max_scroll, max(0, self.scroll))
+        if self.scroll_target is None:
+            return
+        self.scroll_target = min(max_scroll, max(0, self.scroll_target))
+        self.scroll, self.scroll_last_step = smooth_scroll_step(
+            self.scroll, self.scroll_target, self.scroll_last_step,
+            time.monotonic() if now is None else now,
+        )
+        if self.scroll == self.scroll_target:
+            self.scroll_target = None
+
+    @property
+    def is_scrolling(self) -> bool:
+        return self.scroll_target is not None
 
     def key(self, key: str | int, rows: int, cols: int) -> None:
         # Bracketed paste is not a sequence of Enter keypresses. Never execute
@@ -492,9 +526,11 @@ class App:
             self.resize(rows, cols)
             return
         if key == curses.KEY_PPAGE:
+            self.scroll_target = None
             self.scroll += max(1, rows // 2)
             return
         if key == curses.KEY_NPAGE:
+            self.scroll_target = None
             self.scroll = max(0, self.scroll - max(1, rows // 2))
             return
         if key == "\x14":  # Ctrl+T
@@ -505,6 +541,7 @@ class App:
             if self.active is None:
                 self.blocks.clear()
                 self.scroll = 0
+                self.scroll_target = None
             return
         if key == "\x03":  # Ctrl+C: stop current process and cancel pending commands.
             self.pending.clear()
@@ -555,26 +592,30 @@ class App:
             self._run_pending()
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
             self.line = self.line[:-1]
+            self.scroll = 0
+            self.scroll_target = None
         elif key in (curses.KEY_UP, curses.KEY_DOWN) and not self.line and self.blocks:
             # Apple Terminal's "Scroll alternate screen" can turn the trackpad
             # into repeated arrow keys rather than KEY_MOUSE. While the prompt
             # is empty, arrows navigate the output; Ctrl+P/N access history.
-            step = wheel_scroll_step(rows)
-            if key == curses.KEY_UP:
-                self.scroll += step
-            else:
-                self.scroll = max(0, self.scroll - step)
+            self._queue_scroll("up" if key == curses.KEY_UP else "down")
             self.scroll_arrow_events += 1
         elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
             self.line = self.history[self.hist_pos]
+            self.scroll = 0
+            self.scroll_target = None
         elif key in (curses.KEY_DOWN, "\x0e") and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
+            self.scroll = 0
+            self.scroll_target = None
         elif key == "\x04" and not self.line and self.active is None:
             self.should_exit = True
         elif isinstance(key, str) and key.isprintable() and len(self.line) < 4096:
             self.line += key
+            self.scroll = 0
+            self.scroll_target = None
 
     def meta(self, command: str) -> None:
         parts = command.split()
@@ -644,6 +685,8 @@ class App:
                 self.blocks[-1].expanded = not self.blocks[-1].expanded
         elif name == "/clear":
             self.blocks.clear()
+            self.scroll = 0
+            self.scroll_target = None
         elif name == "/raw":
             self.raw_command = command[len(parts[0]):].strip()
             if not self.raw_command:
@@ -651,17 +694,19 @@ class App:
         else:
             self.add_block(command, "Неизвестная команда", "Используй /help", "error")
 
-    def render(self, stdscr: curses.window) -> None:
+    def render(self, stdscr: curses.window, force_redraw: bool = False) -> None:
         h, w = stdscr.getmaxyx()
         if h < 7 or w < 25:
             stdscr.erase()
             self._line(stdscr, 0, 0, "Увеличь окно терминала", 0)
+            if force_redraw:
+                stdscr.redrawwin()
             stdscr.refresh()
             return
         stdscr.erase()
         # Keep the terminal empty on startup. Blocks appear only after commands.
         viewport: list[tuple[str, int, bool]] = []
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             heading = curses.color_pair(3 if block.status == "error" else 5) | curses.A_BOLD
             symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
             viewport.append((f"{symbol} {block.title}", heading, block.status == "ok"))
@@ -691,33 +736,21 @@ class App:
             if not block.expanded and len(output) > len(selected):
                 viewport.append((f"    +{len(output) - len(selected)} строк (Ctrl+T — развернуть)",
                                  curses.color_pair(4), False))
-            viewport.append(("", 0, False))
+            # Space between command blocks, but not between the latest
+            # command's output and the live shell prompt.
+            if index < len(self.blocks) - 1:
+                viewport.append(("", 0, False))
 
-        # Show every queued pasted command below the editable prompt when room
-        # permits. Reserve vertical space rather than obscuring the history or
-        # pretending that the pasted newlines were already confirmed.
+        # Put the prompt in the SAME scrollable timeline as command output.
+        # When viewing earlier output, the prompt must scroll out of view:
+        # it cannot appear after line 55 of a 150-line result.
         review = list(self.paste_review)
         preview_slots = max(0, h - 4)
         visible_count = min(len(review), preview_slots)
         if len(review) > preview_slots:
-            visible_count = max(0, preview_slots - 1)  # Summary row for the rest.
+            visible_count = max(0, preview_slots - 1)
         remaining = len(review) - visible_count
-        footer = bool(viewport or self.paste_feedback)
-        reserved = visible_count + (1 if remaining else 0) + int(footer)
-        # Like a shell, the prompt follows the timeline, with room for review.
-        prompt_y = min(max(0, h - 1 - reserved), len(viewport)) if viewport else 0
-        # Clamp at the real content boundary. Previously self.scroll kept
-        # growing after the first line, so downward wheel events appeared stuck
-        # until that invisible overscroll had been consumed.
-        max_scroll = max(0, len(viewport) - prompt_y)
-        self.scroll = min(max_scroll, max(0, self.scroll))
-        start = max_scroll - self.scroll
-        for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
-            if success and line.startswith("✓ "):
-                self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
-                self._line(stdscr, y, 1, line[1:], attr)
-            else:
-                self._line(stdscr, y, 0, line, attr)
+        footer = bool(viewport or self.paste_feedback or self.scroll_debug)
 
         prompt = self.prompt()
         if self.active:
@@ -725,17 +758,18 @@ class App:
             prompt += f"[{mode_hint}] "
         if not self.direct_input:
             prompt += self.line
-        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
-        # The first pasted command remains editable in the real prompt.
-        # Display the rest as a numbered preview: nothing runs until Enter.
-        next_row = prompt_y + 1
+        prompt_index = len(viewport)
+        viewport.append((prompt, curses.color_pair(1), False))
         for idx, command in enumerate(review[:visible_count], start=2):
-            self._line(stdscr, next_row, 0, f"  {idx}. {command}", curses.color_pair(4))
-            next_row += 1
+            viewport.append((f"  {idx}. {command}", curses.color_pair(4), False))
         if remaining:
-            self._line(stdscr, next_row, 0, f"  … ещё {remaining} команд", curses.color_pair(4))
-            next_row += 1
-        if footer and next_row < h:
+            viewport.append((f"  … ещё {remaining} команд", curses.color_pair(4), False))
+        if footer:
+            viewport.append(("", curses.color_pair(4), False))
+
+        max_scroll = max(0, len(viewport) - h)
+        self.advance_scroll(max_scroll)
+        if footer:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
@@ -744,13 +778,35 @@ class App:
                 status = (f" скролл: колесо={self.scroll_wheel_events} "
                           f"стрелки={self.scroll_arrow_events} "
                           f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
-            self._line(stdscr, next_row, 0, status, curses.color_pair(4))
+            viewport[-1] = (status, curses.color_pair(4), False)
+
+        start = max_scroll - self.scroll
+        for y, (line, attr, success) in enumerate(viewport[start:start + h]):
+            if success and line.startswith("✓ "):
+                self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
+                self._line(stdscr, y, 1, line[1:], attr)
+            else:
+                self._line(stdscr, y, 0, line, attr)
+
+        # Only display the editing cursor when its prompt is in view.
+        prompt_y = prompt_index - start
+        prompt_visible = 0 <= prompt_y < h
         if not self.direct_input:
-            cursor_x = min(w - 2, len(prompt))
-            try:
-                stdscr.move(prompt_y, cursor_x)
-            except curses.error:
-                pass
+            if self._cursor_visible is not prompt_visible:
+                try:
+                    curses.curs_set(1 if prompt_visible else 0)
+                    self._cursor_visible = prompt_visible
+                except curses.error:
+                    pass
+            if prompt_visible:
+                try:
+                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
+                except curses.error:
+                    pass
+        # Cmd+K is handled by Terminal.app, not sent as input. A forced
+        # refresh makes curses repaint after the host clears its screen.
+        if force_redraw:
+            stdscr.redrawwin()
         stdscr.refresh()
 
     @staticmethod
@@ -810,12 +866,16 @@ def run_ui(config: Config) -> None:
         set_bracketed_paste(True)
         curses.curs_set(1)
         stdscr.keypad(True)
-        stdscr.timeout(65)
+        stdscr.timeout(20)
+        needs_redraw = True
+        last_render_at = 0.0
+        last_resync_at = time.monotonic()
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
                 try:
                     key = stdscr.get_wch()
+                    needs_redraw = True
                     if raw_sgr:
                         for kind, value in wheel_decoder.feed(key):
                             if kind == "wheel":
@@ -826,7 +886,7 @@ def run_ui(config: Config) -> None:
                         app.key(key, h, w)
                 except curses.error:
                     pass
-                app.poll()
+                needs_redraw = app.poll() or needs_redraw
                 if getattr(app, "raw_command", ""):
                     command = app.raw_command
                     app.raw_command = ""
@@ -860,13 +920,27 @@ def run_ui(config: Config) -> None:
                                 child_screen(False)
                             # Restore curses only after Codex leaves its own screen.
                             curses.reset_prog_mode()
+                            app._cursor_visible = None
                             raw_sgr = configure_mouse(True)
                             wheel_decoder.reset()
                             set_bracketed_paste(True)
                             stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
-                app.render(stdscr)
+                        needs_redraw = True
+                # Batch fragmented SGR packets; repaint at most 50 fps.
+                now = time.monotonic()
+                # Terminal.app's Cmd+K clears its display without notifying
+                # curses. Periodically invalidate its cached screen so the UI
+                # recovers without a resize or another keypress.
+                # Avoid a full repaint during active wheel animation.
+                resync = not app.is_scrolling and now - last_resync_at >= 1.0
+                if (needs_redraw or app.is_scrolling or resync) and now - last_render_at >= 0.02:
+                    app.render(stdscr, force_redraw=resync)
+                    last_render_at = now
+                    if resync:
+                        last_resync_at = now
+                    needs_redraw = False
         finally:
             configure_mouse(False)
             set_bracketed_paste(False)
