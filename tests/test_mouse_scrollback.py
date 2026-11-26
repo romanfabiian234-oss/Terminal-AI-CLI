@@ -14,6 +14,8 @@ class MouseScrollTests(unittest.TestCase):
         self.app = App(load_config(Path('/tmp/terminal-ai-missing-config-wheel-tests')))
         self.app.line = 'draft command'
 
+    @unittest.skipUnless(getattr(curses, "BUTTON5_PRESSED", None),
+                         "Native button 5 absent; SGR fallback has separate tests")
     def test_wheel_up_and_down_navigate_block_timeline(self):
         with patch('terminal_ai.ui.curses.getmouse', return_value=(0, 10, 10, 0, curses.BUTTON4_PRESSED)):
             self.app.key(curses.KEY_MOUSE, 24, 100)
@@ -28,6 +30,8 @@ class MouseScrollTests(unittest.TestCase):
         self.assertEqual(wheel_scroll_step(60), 10)
         self.assertEqual(wheel_scroll_step(120), 12)
 
+    @unittest.skipUnless(getattr(curses, "BUTTON5_PRESSED", None),
+                         "Native button 5 absent; SGR fallback has separate tests")
     def test_overscrolling_top_never_makes_scrolling_down_stick(self):
         block = self.app.add_block("seq 1 150", "Готово", "Числа от 1 до 150")
         block.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
