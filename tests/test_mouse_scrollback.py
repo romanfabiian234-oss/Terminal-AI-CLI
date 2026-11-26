@@ -200,9 +200,9 @@ class MouseScrollTests(unittest.TestCase):
         with patch("terminal_ai.ui.curses.color_pair", return_value=0):
             self.app.render(screen)
         self.assertIsNotNone(self.app._prompt_click)
-        row, prefix_x, first_char, width = self.app._prompt_click
+        row, prefix_x, first_char, height, width = self.app._prompt_click
         self.assertGreater(first_char, 0)
-        self.app.mouse_click(prefix_x + 2, row, 24, width)
+        self.app.mouse_click(prefix_x + 2, row, height, width)
         self.assertEqual(self.app.cursor, first_char + 2)
         self.assertEqual(len(self.app.line), 85)
 
