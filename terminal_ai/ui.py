@@ -577,7 +577,7 @@ class App:
             if key == curses.KEY_UP:
                 self.suggestion_index = (self.suggestion_index - 1) % len(self.suggestions)
                 return
-            if key in ("\t", curses.KEY_BTAB):
+            if key in ("\t", getattr(curses, "KEY_BTAB", -1)):
                 self._accept_suggestion()
                 return
             if key == "\x1b":
