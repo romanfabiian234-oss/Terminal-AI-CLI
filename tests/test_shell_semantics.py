@@ -91,6 +91,21 @@ class ShellSemantics(unittest.TestCase):
             self.assertIsNone(self.app.previous_cwd)
             self.assertEqual(self.app.blocks[-1].status, "error")
 
+    def test_long_session_history_is_bounded_and_editable(self):
+        self.app.history = [f"echo {i}" for i in range(1030)]
+        self.app.hist_pos = len(self.app.history)
+        for key in "echo latest":
+            self.app.key(key, 24, 90)
+        with patch.object(self.app, "_run_pending"):
+            self.app.key("\n", 24, 90)
+        self.assertEqual(len(self.app.history), 1000)
+        self.assertEqual(self.app.history[0], "echo 31")
+        self.assertEqual(self.app.history[-1], "echo latest")
+        self.assertEqual(self.app.hist_pos, 1000)
+        self.app.key("\x10", 24, 90)  # Ctrl+P
+        self.assertEqual(self.app.line, "echo latest")
+        self.assertEqual(self.app.cursor, len(self.app.line))
+
     def test_posix_colon_is_a_shell_builtin_not_app_command(self):
         self.assertFalse(is_meta_command(":"))
         self.assertFalse(is_meta_command(": unknown"))
