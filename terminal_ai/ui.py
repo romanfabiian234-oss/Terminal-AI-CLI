@@ -187,6 +187,7 @@ class App:
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
         self.next_id = 1
         self.line = ""
+        self.cursor = 0  # Character offset in the editable command line.
         self.pending: deque[str] = deque()
         self.paste_decoder = PasteDecoder()
         self.paste_review: deque[str] = deque()
@@ -370,7 +371,8 @@ class App:
 
     def _update_suggestions(self) -> bool:
         """Debounce external completion work; stale responses never enter UI."""
-        candidate = (self.line if not self.direct_input and not self.paste_review
+        candidate = (self.line if self.cursor == len(self.line)
+                     and not self.direct_input and not self.paste_review
                      and not self.active and not self.line.lstrip().startswith("/")
                      and safe_to_complete(self.line) else "")
         if candidate != self._completion_input:
@@ -399,6 +401,7 @@ class App:
         if choice.kind == "folder" and not choice.insert.endswith("/"):
             choice = Completion(choice.name, choice.insert + "/", choice.kind, choice.description)
         self.line = replace_completion(self.line, choice)
+        self.cursor = len(self.line)
         self.suggestions = ()
         self.suggestion_index = 0
         # A folder is navigation, not a finished completion. Automatically
@@ -508,14 +511,22 @@ class App:
         if self.paste_review:
             self.paste_feedback = "Сначала подтверди или отмени предыдущую вставку (Ctrl+C)."
             return
+        # Insert at the caret, not necessarily at the end. Each pasted
+        # newline remains a separate command requiring explicit Enter.
+        caret = min(self.cursor, len(self.line))
         try:
-            commands = prepare_pasted_commands(text, self.line)
+            commands = prepare_pasted_commands(text, self.line[:caret])
+            if commands:
+                commands[-1] += self.line[caret:]
+                if len(commands[-1]) > 4096:
+                    raise ValueError("Одна из команд слишком длинная (максимум 4096 символов).")
         except ValueError as exc:
             self.paste_feedback = str(exc)
             return
         if not commands:
             return
         self.line = commands[0]
+        self.cursor = len(commands[0]) - (len(self.line[caret:]) if len(commands) == 1 else 0)
         self.scroll = 0
         self.scroll_target = None
         self.paste_review.extend(commands[1:])
@@ -616,6 +627,8 @@ class App:
             self.paste_decoder.reset()
             self.paste_feedback = ""
             self.line = ""
+            self.cursor = 0
+            self.suggestions = ()
             if self.active:
                 if self.session is not None:
                     try:
@@ -649,6 +662,7 @@ class App:
             # Only a real Enter here approves this command. Pasted newlines
             # never reach this branch, even with an active shell process.
             self.line = self.paste_review.popleft() if self.paste_review else ""
+            self.cursor = len(self.line)
             self.paste_feedback = (
                 f"Осталось {len(self.paste_review) + 1} команд: Enter — следующая; Ctrl+C — отменить."
                 if self.line else ""
@@ -657,8 +671,31 @@ class App:
             self.hist_pos = len(self.history)
             self.pending.append(command)
             self._run_pending()
+        elif key in (curses.KEY_LEFT, "\x02"):  # Left / Ctrl+B
+            self.cursor = max(0, self.cursor - 1)
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_RIGHT, "\x06"):  # Right / Ctrl+F
+            self.cursor = min(len(self.line), self.cursor + 1)
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_HOME, "\x01"):  # Home / Ctrl+A
+            self.cursor = 0
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_END, "\x05"):  # End / Ctrl+E
+            self.cursor = len(self.line)
+            self.suggestions = ()
+            self._completion_input = ""
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
-            self.line = self.line[:-1]
+            if self.cursor:
+                self.line = self.line[:self.cursor - 1] + self.line[self.cursor:]
+                self.cursor -= 1
+            self.scroll = 0
+            self.scroll_target = None
+        elif key == curses.KEY_DC:  # Delete the character under the caret.
+            if self.cursor < len(self.line):
+                self.line = self.line[:self.cursor] + self.line[self.cursor + 1:]
             self.scroll = 0
             self.scroll_target = None
         elif key in (curses.KEY_UP, curses.KEY_DOWN) and not self.line and self.blocks:
@@ -670,17 +707,20 @@ class App:
         elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
             self.line = self.history[self.hist_pos]
+            self.cursor = len(self.line)
             self.scroll = 0
             self.scroll_target = None
         elif key in (curses.KEY_DOWN, "\x0e") and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
+            self.cursor = len(self.line)
             self.scroll = 0
             self.scroll_target = None
         elif key == "\x04" and not self.line and self.active is None:
             self.should_exit = True
         elif isinstance(key, str) and key.isprintable() and len(self.line) < 4096:
-            self.line += key
+            self.line = self.line[:self.cursor] + key + self.line[self.cursor:]
+            self.cursor += len(key)
             self.scroll = 0
             self.scroll_target = None
 
@@ -819,12 +859,22 @@ class App:
         remaining = len(review) - visible_count
         footer = bool(viewport or self.paste_feedback or self.scroll_debug)
 
-        prompt = self.prompt()
+        prompt_prefix = self.prompt()
         if self.active:
             mode_hint = "stdin" if self.direct_input else f"очередь {len(self.pending)}"
-            prompt += f"[{mode_hint}] "
-        if not self.direct_input:
-            prompt += self.line
+            prompt_prefix += f"[{mode_hint}] "
+        # Keep the insertion point visible even when the command is wider
+        # than the window, without changing the underlying command text.
+        caret = min(self.cursor, len(self.line))
+        available = max(1, w - 2)
+        prefix = prompt_prefix
+        if len(prefix) >= available:
+            prefix = prefix[-(available - 1):] if available > 1 else ""
+        space = max(1, available - len(prefix))
+        first_char = max(0, caret - space + 1)
+        visible_line = self.line[first_char:first_char + space]
+        prompt = prefix + (visible_line if not self.direct_input else "")
+        cursor_x = min(w - 2, len(prefix) + caret - first_char)
         prompt_index = len(viewport)
         viewport.append((prompt, curses.color_pair(1), False))
         for idx, command in enumerate(review[:visible_count], start=2):
@@ -870,7 +920,7 @@ class App:
                     pass
             if prompt_visible:
                 try:
-                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
+                    stdscr.move(prompt_y, cursor_x)
                 except curses.error:
                     pass
         # Cmd+K is handled by Terminal.app, not sent as input. A forced
