@@ -197,6 +197,7 @@ class App:
         self.scroll_target: int | None = None
         self.scroll_direction = ""
         self.scroll_last_step = 0.0
+        self._cursor_visible: bool | None = None
         # Terminal.app may report alternate-screen wheel gestures as arrows.
         self.scroll_wheel_events = 0
         self.scroll_arrow_events = 0
@@ -791,10 +792,12 @@ class App:
         prompt_y = prompt_index - start
         prompt_visible = 0 <= prompt_y < h
         if not self.direct_input:
-            try:
-                curses.curs_set(1 if prompt_visible else 0)
-            except curses.error:
-                pass
+            if self._cursor_visible is not prompt_visible:
+                try:
+                    curses.curs_set(1 if prompt_visible else 0)
+                    self._cursor_visible = prompt_visible
+                except curses.error:
+                    pass
             if prompt_visible:
                 try:
                     stdscr.move(prompt_y, min(w - 2, len(prompt)))
@@ -917,6 +920,7 @@ def run_ui(config: Config) -> None:
                                 child_screen(False)
                             # Restore curses only after Codex leaves its own screen.
                             curses.reset_prog_mode()
+                            app._cursor_visible = None
                             raw_sgr = configure_mouse(True)
                             wheel_decoder.reset()
                             set_bracketed_paste(True)
