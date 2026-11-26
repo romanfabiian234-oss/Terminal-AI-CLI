@@ -395,12 +395,18 @@ class App:
     def _accept_suggestion(self) -> None:
         if not self.suggestions:
             return
-        self.line = replace_completion(self.line, self.suggestions[self.suggestion_index])
+        choice = self.suggestions[self.suggestion_index]
+        self.line = replace_completion(self.line, choice)
         self.suggestions = ()
         self.suggestion_index = 0
-        # Do not immediately reopen the same popup after pressing Tab.
-        self._completion_input = self.line
-        self._completion_suppressed = True
+        # A folder is navigation, not a finished completion. Automatically
+        # refresh its children without the old Space + Backspace workaround.
+        if choice.kind == "folder":
+            self._completion_input = ""
+            self._completion_suppressed = False
+        else:
+            self._completion_input = self.line
+            self._completion_suppressed = True
         self.scroll = 0
         self.scroll_target = None
 
