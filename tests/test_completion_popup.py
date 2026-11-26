@@ -117,6 +117,23 @@ class CompletionBridgeTests(unittest.TestCase):
             finally:
                 worker.close()
 
+    def test_backend_keeps_many_results_for_popup_scrolling(self):
+        payload = json.dumps({"suggestions": [
+            {"name": f"folder_{n:02}", "insertValue": f"folder_{n:02}/",
+             "type": "folder"} for n in range(23)
+        ]})
+        fake = subprocess.CompletedProcess(["is", "complete", "cd "], 0, payload, "")
+        with patch("terminal_ai.completion.subprocess.run", return_value=fake):
+            worker = CompletionWorker(binary="/opt/homebrew/bin/is")
+            try:
+                worker.request("cd ", Path("/tmp"))
+                worker._future.result(timeout=3)
+                result = worker.collect("cd ", Path("/tmp"))
+                self.assertEqual(len(result), 23)
+                self.assertEqual(result[-1].name, "folder_22")
+            finally:
+                worker.close()
+
     def test_malformed_untrusted_response_cannot_crash(self):
         self.assertEqual(parse_completions("invalid"), ())
         self.assertEqual(parse_completions('{"suggestions":null}'), ())
@@ -217,6 +234,61 @@ class CompletionPopupTests(unittest.TestCase):
             self.assertEqual(self.app.suggestions, ())
             self.assertFalse(self.app.pending)
             start.assert_not_called()
+
+    def test_arrow_down_reveals_options_beyond_five_visible_rows(self):
+        self.app.line = "cd "
+        self.app.suggestions = tuple(
+            Completion(f"folder_{n:02}", f"folder_{n:02}/", "folder")
+            for n in range(15)
+        )
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", side_effect=lambda n: n * 256):
+            self.app.render(screen)
+            self.assertFalse(any("folder_10" in text for _, _, text, _ in screen.writes))
+            for _ in range(10):
+                self.app.key(curses.KEY_DOWN, 24, 100)
+            self.app.render(screen)
+            self.assertEqual(self.app.suggestion_index, 10)
+            self.assertTrue(any("folder_10" in text for _, _, text, _ in screen.writes))
+            self.assertTrue(any("11/15" in text for _, _, text, _ in screen.writes))
+            selected = [text for _, _, text, attr in screen.writes
+                        if attr & curses.A_REVERSE]
+            self.assertTrue(any("folder_10" in text for text in selected))
+        with patch.object(self.app, "start") as start:
+            self.app.key("\t", 24, 100)
+            self.assertEqual(self.app.line, "cd folder_10/")
+            start.assert_not_called()
+
+    def test_arrow_up_wraps_to_last_option_and_makes_it_visible(self):
+        self.app.line = "cd "
+        self.app.suggestions = tuple(
+            Completion(f"folder_{n:02}", f"folder_{n:02}/", "folder")
+            for n in range(12)
+        )
+        self.app.key(curses.KEY_UP, 24, 100)
+        self.assertEqual(self.app.suggestion_index, 11)
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", side_effect=lambda n: n * 256):
+            self.app.render(screen)
+        self.assertTrue(any("folder_11" in text and attr & curses.A_REVERSE
+                            for _, _, text, attr in screen.writes))
+        self.assertTrue(any("12/12" in text for _, _, text, _ in screen.writes))
+        self.app.key(curses.KEY_DOWN, 24, 100)
+        self.assertEqual(self.app.suggestion_index, 0)
+
+    def test_five_row_popup_stays_in_window_when_scrolling(self):
+        self.app.line = "cd "
+        self.app.suggestions = tuple(
+            Completion(f"folder_{n:02}", f"folder_{n:02}/", "folder")
+            for n in range(18)
+        )
+        self.app.suggestion_index = 16
+        screen = FakeWindow(9, 50)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        self.assertTrue(any("folder_16" in text for _, _, text, _ in screen.writes))
+        self.assertTrue(all(0 <= row < 9 for row, _, _, _ in screen.writes))
+        self.assertTrue(all(0 <= column < 50 for _, column, _, _ in screen.writes))
 
     def test_popup_does_not_obscure_prompt_when_short_window(self):
         self.app.line = "git "
