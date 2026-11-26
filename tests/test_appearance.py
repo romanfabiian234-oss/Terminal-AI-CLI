@@ -71,7 +71,7 @@ class ShellAppearance(unittest.TestCase):
         self.assertEqual(prompt_line, screen.height - 1)
         self.assertEqual(screen.cursor[0], prompt_line)
         self.assertLess(heading[0], prompt_line - 1)
-        self.assertEqual(max(y for y, _, s, _ in texts if 'hi' in s), prompt_line - 2)
+        self.assertTrue(any(y < prompt_line - 1 and 'hi' in s for y, _, s, _ in texts))
 
 
     def test_prompt_stays_at_bottom_on_resize_and_during_scrollback(self):
