@@ -21,6 +21,7 @@ from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_rea
 from .session import PersistentShell
 from .paste import PasteDecoder, prepare_pasted_commands
 from .wheel import SGRWheelDecoder
+from .completion import Completion, CompletionWorker, replace_completion, safe_to_complete
 
 
 # The xterm alternate screen separates the TUI from regular shell scrollback.
@@ -198,6 +199,12 @@ class App:
         self.scroll_direction = ""
         self.scroll_last_step = 0.0
         self._cursor_visible: bool | None = None
+        self.completion = CompletionWorker()
+        self.suggestions: tuple[Completion, ...] = ()
+        self.suggestion_index = 0
+        self._completion_input = ""
+        self._completion_due = 0.0
+        self._completion_suppressed = False
         # Terminal.app may report alternate-screen wheel gestures as arrows.
         self.scroll_wheel_events = 0
         self.scroll_arrow_events = 0
@@ -357,7 +364,45 @@ class App:
             changed = True
         if self._run_pending():
             changed = True
+        if self._update_suggestions():
+            changed = True
         return changed
+
+    def _update_suggestions(self) -> bool:
+        """Debounce external completion work; stale responses never enter UI."""
+        candidate = (self.line if not self.direct_input and not self.paste_review
+                     and not self.active and not self.line.lstrip().startswith("/")
+                     and safe_to_complete(self.line) else "")
+        if candidate != self._completion_input:
+            had_suggestions = bool(self.suggestions)
+            self._completion_input = candidate
+            self._completion_due = time.monotonic() + 0.16
+            self._completion_suppressed = False
+            self.suggestions = ()
+            self.suggestion_index = 0
+            return had_suggestions
+        if not candidate or self._completion_suppressed:
+            return False
+        if time.monotonic() >= self._completion_due:
+            self.completion.request(candidate, self.cwd)
+        result = self.completion.collect(candidate, self.cwd)
+        if result is None:
+            return False
+        self.suggestions = result
+        self.suggestion_index = 0
+        return True
+
+    def _accept_suggestion(self) -> None:
+        if not self.suggestions:
+            return
+        self.line = replace_completion(self.line, self.suggestions[self.suggestion_index])
+        self.suggestions = ()
+        self.suggestion_index = 0
+        # Do not immediately reopen the same popup after pressing Tab.
+        self._completion_input = self.line
+        self._completion_suppressed = True
+        self.scroll = 0
+        self.scroll_target = None
 
     def _queue_ai(self, b: Block, *, force: bool = False) -> None:
         if not self.ai_on or b.exit_code is None:
@@ -525,6 +570,20 @@ class App:
         if key == curses.KEY_RESIZE:
             self.resize(rows, cols)
             return
+        if self.suggestions:
+            if key == curses.KEY_DOWN:
+                self.suggestion_index = (self.suggestion_index + 1) % len(self.suggestions)
+                return
+            if key == curses.KEY_UP:
+                self.suggestion_index = (self.suggestion_index - 1) % len(self.suggestions)
+                return
+            if key in ("\t", curses.KEY_BTAB):
+                self._accept_suggestion()
+                return
+            if key == "\x1b":
+                self.suggestions = ()
+                self._completion_suppressed = True
+                return
         if key == curses.KEY_PPAGE:
             self.scroll_target = None
             self.scroll += max(1, rows // 2)
@@ -788,8 +847,11 @@ class App:
             else:
                 self._line(stdscr, y, 0, line, attr)
 
-        # Only display the editing cursor when its prompt is in view.
+        # A popup is only an overlay, not another command or history block.
         prompt_y = prompt_index - start
+        if 0 <= prompt_y < h:
+            self._draw_suggestions(stdscr, prompt_y, h, w)
+        # Only display the editing cursor when its prompt is in view.
         prompt_visible = 0 <= prompt_y < h
         if not self.direct_input:
             if self._cursor_visible is not prompt_visible:
@@ -808,6 +870,38 @@ class App:
         if force_redraw:
             stdscr.redrawwin()
         stdscr.refresh()
+
+    def _draw_suggestions(self, stdscr: curses.window,
+                          prompt_y: int, height: int, width: int) -> None:
+        """A compact popup with the exact same foreground color as the prompt.
+
+        The symbols are monochrome line glyphs, not emoji or color artwork.
+        """
+        if not self.suggestions or width < 28:
+            return
+        box_width = min(38, width - 3)
+        n = min(5, len(self.suggestions), max(0, height - 3))
+        if n == 0:
+            return
+        box_height = n + 2
+        top = prompt_y + 1 if height - prompt_y - 1 >= box_height else prompt_y - box_height
+        if top < 0:
+            return
+        left = min(max(1, len(self.prompt()) + len(self.line) + 1), width - box_width - 1)
+        blue = curses.color_pair(1)
+        self._line(stdscr, top, left, "╭" + "─" * (box_width - 2) + "╮", blue)
+        symbols = {"folder": "▱", "file": "▤", "option": "◇", "subcommand": "▸",
+                   "shortcut": "↳", "arg": "·", "command": "›"}
+        for index, suggestion in enumerate(self.suggestions[:n]):
+            symbol = symbols.get(suggestion.kind, "›")
+            text = f" {symbol} {suggestion.name}"
+            text = text[:box_width - 3].ljust(box_width - 2)
+            self._line(stdscr, top + index + 1, left, "│", blue)
+            self._line(stdscr, top + index + 1, left + 1, text,
+                       blue | curses.A_REVERSE if index == self.suggestion_index else blue)
+            self._line(stdscr, top + index + 1, left + box_width - 1, "│", blue)
+        self._line(stdscr, top + box_height - 1, left,
+                   "╰" + "─" * (box_width - 2) + "╯", blue)
 
     @staticmethod
     def _line(stdscr: curses.window, y: int, x: int, text: str, attr: int) -> None:
@@ -829,6 +923,7 @@ class App:
         return result[:35]
 
     def stop(self) -> None:
+        self.completion.close()
         if self.session is not None:
             self.session.stop()
             self.session = None
