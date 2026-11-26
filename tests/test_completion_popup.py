@@ -7,8 +7,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from terminal_ai.completion import (
-    Completion, CompletionWorker, parse_completions, replace_completion,
-    safe_to_complete,
+    Completion, CompletionWorker, matching_completions, parse_completions,
+    replace_completion, safe_to_complete,
 )
 from terminal_ai.core import load_config
 from terminal_ai.ui import App
@@ -27,6 +27,30 @@ class CompletionBridgeTests(unittest.TestCase):
         self.assertEqual([s.name for s in out], ["git", "Downloads", "secret"])
         self.assertEqual([s.kind for s in out], ["subcommand", "folder", "file"])
         self.assertEqual(out[1].insert, "Downloads/")
+
+    def test_unrelated_folder_suggestions_do_not_replace_executable(self):
+        options = (Completion("reports", "reports", "folder"),
+                   Completion("tests", "tests", "folder"),
+                   Completion("python3.15", "python3.15", "command"))
+        self.assertEqual([x.name for x in matching_completions("python3", options)],
+                         ["python3.15"])
+        self.assertEqual(matching_completions("python3", options[:2]), ())
+
+    def test_arguments_appear_after_space_and_match_path_prefix(self):
+        options = (Completion("Downloads", "Downloads/", "folder"),
+                   Completion("Documents", "Documents/", "folder"))
+        self.assertEqual(matching_completions("cd ", options), options)
+        self.assertEqual([x.name for x in matching_completions("cd ~/Do", options)],
+                         ["Documents"])
+        self.assertEqual([x.name for x in matching_completions("cd ~/Down", options)],
+                         ["Downloads"])
+
+    def test_matching_commands_remain_available_without_trailing_space(self):
+        options = (Completion("git", "git", "command"),
+                   Completion("git-flow", "git-flow", "command"),
+                   Completion("reports", "reports", "folder"))
+        self.assertEqual([x.name for x in matching_completions("gi", options)],
+                         ["git", "git-flow"])
 
     def test_malformed_untrusted_response_cannot_crash(self):
         self.assertEqual(parse_completions("invalid"), ())
