@@ -52,8 +52,8 @@ class ShellAppearance(unittest.TestCase):
         screen = FakeWindow()
         self.render(screen)
         self.assertFalse(self.app.blocks)
-        self.assertEqual(screen.writes, [(23, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
-        self.assertEqual(screen.cursor, (23, len('MacBook-Air-Fabiian ~ % ')))
+        self.assertEqual(screen.writes, [(0, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
+        self.assertEqual(screen.cursor, (0, len('MacBook-Air-Fabiian ~ % ')))
 
     def test_blocks_are_inserted_above_following_prompt(self):
         screen = FakeWindow()
@@ -68,13 +68,15 @@ class ShellAppearance(unittest.TestCase):
         self.assertEqual([(y, attr) for y, _, s, attr in texts if s == '✓'],
                          [(heading[0], 512 | curses.A_BOLD)])
         prompt_line = next(y for y, _, s, _ in texts if s.startswith('MacBook-Air-Fabiian '))
-        self.assertEqual(prompt_line, screen.height - 1)
+        self.assertLess(prompt_line, screen.height - 2)
         self.assertEqual(screen.cursor[0], prompt_line)
-        self.assertLess(heading[0], prompt_line - 1)
-        self.assertTrue(any(y < prompt_line - 1 and 'hi' in s for y, _, s, _ in texts))
+        self.assertLess(heading[0], prompt_line)
+        self.assertTrue(any(y < prompt_line and 'hi' in s for y, _, s, _ in texts))
+        self.assertTrue(any(y == prompt_line + 1 and 'isolated' in s
+                            for y, _, s, _ in texts))
 
 
-    def test_prompt_stays_at_bottom_on_resize_and_during_scrollback(self):
+    def test_prompt_follows_history_and_only_reaches_bottom_when_full(self):
         b = self.app.add_block('seq 1 90', 'Готово', '')
         b.output.feed(('\n'.join(map(str, range(1, 91))) + '\n').encode())
         b.finish(0)
@@ -82,10 +84,39 @@ class ShellAppearance(unittest.TestCase):
             screen = FakeWindow(height, 90)
             self.app.key(curses.KEY_PPAGE, height, 90)
             self.render(screen)
-            self.assertEqual(screen.cursor[0], height - 1)
-            self.assertTrue(any(y == height - 1 and 'MacBook-Air-Fabiian' in text
+            self.assertEqual(screen.cursor[0], height - 2)
+            self.assertTrue(any(y == height - 2 and 'MacBook-Air-Fabiian' in text
                                 for y, _, text, _ in screen.writes))
             self.assertTrue(all(0 <= y < height for y, _, _, _ in screen.writes))
+
+    def test_prompt_moves_down_with_each_short_command_without_empty_gap(self):
+        screen = FakeWindow(45, 100)
+        self.render(screen)
+        self.assertEqual(screen.cursor[0], 0)
+        positions = []
+        for n in range(1, 4):
+            block = self.app.add_block(f"echo {n}", "Готово", f"Результат {n}")
+            block.output.feed((str(n) + "\n").encode())
+            block.finish(0)
+            self.render(screen)
+            positions.append(screen.cursor[0])
+            self.assertLess(screen.cursor[0], screen.height - 2)
+            self.assertTrue(any(y < screen.cursor[0] and text.strip() == str(n)
+                                for y, _, text, _ in screen.writes))
+        self.assertEqual(positions, sorted(positions))
+        self.assertEqual(len(set(positions)), 3)
+
+    def test_prompt_stays_after_blocks_when_output_collapses(self):
+        screen = FakeWindow(35, 100)
+        b = self.app.add_block("seq 1 150", "Готово", "")
+        b.output.feed(("\n".join(map(str, range(1, 151))) + "\n").encode())
+        b.finish(0)
+        self.render(screen)
+        self.assertEqual(screen.cursor[0], screen.height - 2)
+        self.app.key("\x14", 35, 100)
+        self.render(screen)
+        self.assertLess(screen.cursor[0], screen.height - 2)
+        self.assertTrue(any("+147 строк" in text for _, _, text, _ in screen.writes))
 
     def test_external_terminal_clear_forces_repaint_without_erasing_history(self):
         screen = FakeWindow(24, 100)
@@ -101,7 +132,7 @@ class ShellAppearance(unittest.TestCase):
         self.assertEqual(screen.redraw_count, 1)
         self.assertEqual(len(self.app.blocks), count)
         self.assertEqual(self.app.line, 'echo still typing')
-        self.assertEqual(screen.cursor[0], screen.height - 1)
+        self.assertLess(screen.cursor[0], screen.height - 2)
         self.assertTrue(any('Текущая папка' in text for _, _, text, _ in screen.writes))
         self.assertTrue(any('echo still typing' in text for _, _, text, _ in screen.writes))
 
@@ -164,7 +195,7 @@ class ShellAppearance(unittest.TestCase):
         b.output.feed(('\n'.join(map(str, range(90))) + '\n').encode())
         b.expanded = True
         self.render(screen)
-        self.assertEqual(screen.cursor[0], screen.height - 1)
+        self.assertEqual(screen.cursor[0], screen.height - 2)
         self.assertFalse(any('Terminal AI CLI' in s for _, _, s, _ in screen.writes))
 
 
