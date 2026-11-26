@@ -82,7 +82,8 @@ def matching_completions(line: str, choices: tuple[Completion, ...], limit: int 
     if has_arguments and command == "cd" and not argument.startswith("-"):
         context = "directory"
     elif (has_arguments and re.fullmatch(r"python(?:2|3)?(?:\.\d+)?", command)
-          and not argument.startswith("-") and len(argument.split()) <= 1):
+          and not argument.startswith("-")
+          and (not argument or (not line.endswith(" ") and len(argument.split()) == 1))):
         context = "python_script"
 
     if line[-1].isspace():
