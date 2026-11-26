@@ -793,10 +793,13 @@ class App:
         if not self.direct_input:
             try:
                 curses.curs_set(1 if prompt_visible else 0)
-                if prompt_visible:
-                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
             except curses.error:
                 pass
+            if prompt_visible:
+                try:
+                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
+                except curses.error:
+                    pass
         # Cmd+K is handled by Terminal.app, not sent as input. A forced
         # refresh makes curses repaint after the host clears its screen.
         if force_redraw:
