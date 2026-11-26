@@ -97,12 +97,17 @@ class ShellAppearance(unittest.TestCase):
 
     def test_caret_remains_visible_when_command_is_wider_than_window(self):
         screen = FakeWindow(24, 40)
+        self.app.cwd = Path.home()
         for ch in "echo " + "x" * 80:
             self.app.key(ch, 24, 40)
         self.render(screen)
         self.assertLessEqual(screen.cursor[1], 38)
         self.assertGreaterEqual(screen.cursor[1], len(self.app.prompt()))
-        for _ in range(75):
+        end_x = screen.cursor[1]
+        self.app.key(curses.KEY_LEFT, 24, 40)
+        self.render(screen)
+        self.assertEqual(screen.cursor[1], end_x - 1)
+        for _ in range(74):
             self.app.key(curses.KEY_LEFT, 24, 40)
         self.render(screen)
         self.assertLessEqual(screen.cursor[1], 38)
