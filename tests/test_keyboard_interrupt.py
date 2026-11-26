@@ -62,6 +62,7 @@ class CtrlCInputTests(unittest.TestCase):
         cfg.shell = "/bin/sh"
         app = Mock()
         app.should_exit = False
+        app.raw_command = ""  # No fullscreen handoff pending.
         app.poll.return_value = False
         app.is_scrolling = False
 
