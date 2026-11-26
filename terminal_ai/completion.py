@@ -138,7 +138,7 @@ def _available_home_dirs(home: Path) -> tuple[Completion, ...]:
 
 def _path_entries(context: str, argument: str, cwd: Path, home: Path) -> tuple[Completion, ...]:
     """Show contents of an explicitly selected folder without relying on a refresh trick."""
-    if not argument or argument.startswith("-"):
+    if argument.startswith("-"):
         return ()
     raw = argument.replace("\\ ", " ").strip("'\"")
     if raw.startswith("~/") or raw == "~":
@@ -146,7 +146,9 @@ def _path_entries(context: str, argument: str, cwd: Path, home: Path) -> tuple[C
     else:
         value = Path(raw)
         absolute = value if value.is_absolute() else cwd / value
-    if raw.endswith("/") or raw == "~":
+    if not raw:
+        directory, prefix, fragment = cwd, "", ""
+    elif raw.endswith("/") or raw == "~":
         directory, prefix, fragment = absolute, argument, ""
     else:
         directory, prefix, fragment = absolute.parent, argument.rsplit("/", 1)[0] + "/" if "/" in argument else "", absolute.name
@@ -189,9 +191,10 @@ def contextual_completions(line: str, cwd: Path, choices: tuple[Completion, ...]
     folders = _available_home_dirs(home) if not argument else ()
     paths = _path_entries(kind, argument, cwd, home)
     if not argument:
-        scripts = tuple(c for c in choices if kind == "python" and
+        scripts = tuple(c for c in (paths + choices) if kind == "python" and
                         c.kind != "folder" and c.insert.casefold().endswith(".py"))
-        ordered = scripts + folders + choices
+        directory_choices = tuple(c for c in paths if c.kind == "folder")
+        ordered = scripts + folders + directory_choices + choices
     elif "/" in argument or argument.startswith("~"):
         # For a selected parent/home path, only offer entries from that path,
         # not unrelated suggestions from the original working directory.
