@@ -1087,6 +1087,32 @@ class App:
             self.master = None
 
 
+def read_input_event(stdscr: curses.window, app: App, rows: int, cols: int,
+                     raw_sgr: bool, wheel_decoder: SGRWheelDecoder) -> bool:
+    """Route input including SIGINT as an in-app cancellation, never a TUI crash."""
+    try:
+        key = stdscr.get_wch()
+    except KeyboardInterrupt:
+        # On macOS Python may raise SIGINT here instead of returning Ctrl+C.
+        # Reuse the existing cancellation path (including pending paste/jobs).
+        app.key("\x03", rows, cols)
+        return True
+    except curses.error:
+        return False
+    if raw_sgr:
+        for kind, value in wheel_decoder.feed(key):
+            if kind == "wheel":
+                app.scroll_wheel(str(value), rows)
+            elif kind == "click":
+                x, y = value
+                app.mouse_click(x, y, rows, cols)
+            else:
+                app.key(value, rows, cols)
+    else:
+        app.key(key, rows, cols)
+    return True
+
+
 def run_ui(config: Config) -> None:
     app = App(config)
     if not Path(config.shell).exists():
@@ -1114,22 +1140,8 @@ def run_ui(config: Config) -> None:
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
-                try:
-                    key = stdscr.get_wch()
-                    needs_redraw = True
-                    if raw_sgr:
-                        for kind, value in wheel_decoder.feed(key):
-                            if kind == "wheel":
-                                app.scroll_wheel(str(value), h)
-                            elif kind == "click":
-                                x, y = value
-                                app.mouse_click(x, y, h, w)
-                            else:
-                                app.key(value, h, w)
-                    else:
-                        app.key(key, h, w)
-                except curses.error:
-                    pass
+                needs_redraw = (read_input_event(stdscr, app, h, w, raw_sgr, wheel_decoder)
+                                or needs_redraw)
                 needs_redraw = app.poll() or needs_redraw
                 if getattr(app, "raw_command", ""):
                     command = app.raw_command
