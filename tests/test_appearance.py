@@ -101,7 +101,7 @@ class ShellAppearance(unittest.TestCase):
             self.render(screen)
             positions.append(screen.cursor[0])
             self.assertLess(screen.cursor[0], screen.height - 2)
-            self.assertTrue(any(y < screen.cursor[0] and text.strip() == str(n)
+            self.assertTrue(any(y == screen.cursor[0] - 1 and text.strip() == str(n)
                                 for y, _, text, _ in screen.writes))
         self.assertEqual(positions, sorted(positions))
         self.assertEqual(len(set(positions)), 3)
@@ -166,6 +166,8 @@ class ShellAppearance(unittest.TestCase):
         bottom_view = '\n'.join(text for _, _, text, _ in screen.writes)
         self.assertIn('150', bottom_view)
         self.assertNotIn('+147 строк', bottom_view)
+        self.assertTrue(any(y == screen.cursor[0] - 1 and text.strip() == '150'
+                            for y, _, text, _ in screen.writes))
         for _ in range(20):
             self.app.key(curses.KEY_PPAGE, 24, 90)
         self.render(screen)
