@@ -332,6 +332,27 @@ class CompletionPopupTests(unittest.TestCase):
             self.assertFalse(self.app.pending)
             start.assert_not_called()
 
+    def test_left_right_editing_dismisses_popup_without_executing(self):
+        self.app.line = "git status"
+        self.app.cursor = len(self.app.line)
+        self.app.suggestions = (Completion("status", "status", "subcommand"),)
+        with patch.object(self.app, "start") as start:
+            self.app.key(curses.KEY_LEFT, 24, 100)
+            self.assertEqual(self.app.cursor, len("git statu"))
+            self.assertEqual(self.app.suggestions, ())
+            self.app.key("X", 24, 100)
+            self.assertEqual(self.app.line, "git statuXs")
+            self.app.key(curses.KEY_RIGHT, 24, 100)
+            start.assert_not_called()
+
+    def test_tab_places_caret_at_end_of_inserted_folder(self):
+        self.app.line = "cd "
+        self.app.cursor = 3
+        self.app.suggestions = (Completion("Documents", "~/Documents/", "folder"),)
+        self.app.key("\t", 24, 100)
+        self.assertEqual(self.app.line, "cd ~/Documents/")
+        self.assertEqual(self.app.cursor, len(self.app.line))
+
     def test_arrow_down_reveals_options_beyond_five_visible_rows(self):
         self.app.line = "cd "
         self.app.suggestions = tuple(
