@@ -1069,6 +1069,7 @@ class App:
 
     def stop(self) -> None:
         self.completion.close()
+        self.worker.close()
         if self.session is not None:
             self.session.stop()
             self.session = None
