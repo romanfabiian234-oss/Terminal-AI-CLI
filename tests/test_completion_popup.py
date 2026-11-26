@@ -117,7 +117,7 @@ class CompletionBridgeTests(unittest.TestCase):
                 names = [x.name for x in result]
                 self.assertEqual(names[0], "run.py")
                 self.assertIn("src", names)
-                self.assertIn("Домой (~/)", names)
+                self.assertIn("Домой", names)
             finally:
                 worker.close()
 
@@ -376,7 +376,7 @@ class CompletionPopupTests(unittest.TestCase):
     def test_tab_on_folder_reopens_children_without_space_backspace(self):
         self.app.line = "cd "
         self.app.suggestions = (
-            Completion("Домой (~/)", "~/", "folder"),
+            Completion("Домой", "~/", "folder"),
             Completion("Documents", "~/Documents/", "folder"),
         )
         with patch.object(self.app, "start") as start:
