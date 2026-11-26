@@ -908,7 +908,8 @@ class App:
         for row, suggestion in enumerate(self.suggestions[first:first + n]):
             index = first + row
             symbol = symbols.get(suggestion.kind, "›")
-            text = f" {symbol} {suggestion.name}"
+            label = suggestion.name.removesuffix(" (~/)")
+            text = f" {symbol} {label}"
             text = text[:box_width - 3].ljust(box_width - 2)
             self._line(stdscr, top + row + 1, left, "│", blue)
             self._line(stdscr, top + row + 1, left + 1, text,
