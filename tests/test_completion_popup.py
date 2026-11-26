@@ -137,6 +137,23 @@ class CompletionBridgeTests(unittest.TestCase):
                     self.assertIn("~/Downloads/", inserts)
                     self.assertIn("reports/", inserts)
 
+    def test_current_project_scripts_appear_before_folders_for_python(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            cwd = Path(root) / "project"
+            home.mkdir()
+            cwd.mkdir()
+            (cwd / "run.py").write_text("print(1)")
+            (cwd / "src").mkdir()
+            (cwd / "README.md").write_text("notes")
+            python = contextual_completions("python3 ", cwd, (), home)
+            self.assertEqual(python[0].insert, "run.py")
+            self.assertIn("src/", [r.insert for r in python])
+            self.assertNotIn("README.md", [r.insert for r in python])
+            cd = contextual_completions("cd ", cwd, (), home)
+            self.assertIn("src/", [r.insert for r in cd])
+            self.assertNotIn("run.py", [r.insert for r in cd])
+
     def test_home_and_parent_completions_do_not_leak_current_directory(self):
         with tempfile.TemporaryDirectory() as root:
             home = Path(root) / "home"
