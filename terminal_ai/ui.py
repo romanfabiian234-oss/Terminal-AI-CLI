@@ -117,7 +117,43 @@ def is_meta_command(command: str) -> bool:
     if not parts:
         return False
     name = parts[0]
-    return name.startswith(":") or (name.startswith("/") and name[1:] in SLASH_COMMANDS)
+    # ':' by itself is a valid POSIX shell no-op; only known aliases are app commands.
+    return (len(name) > 1 and name[0] in ":/" and
+            name[1:] in SLASH_COMMANDS)
+
+
+def simple_cd_target(command: str) -> str | None:
+    """Return the argument only for a standalone, supported cd builtin.
+
+    A compound command, redirect, multiple argument, substitution or glob must
+    reach the actual shell instead of silently dropping part of the command.
+    Punctuation-aware tokenization preserves quoted directory names.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        parts = list(lexer)
+    except ValueError:
+        return None
+    if not parts or parts[0] != "cd":
+        return None
+    args = parts[1:]
+    if args and args[0] == "--":
+        args = args[1:]
+    if len(args) > 1:
+        return None
+    target = args[0] if args else "~"
+    # Shell operators/expansions can have side effects and need shell semantics.
+    if (not target or any(pattern in target for pattern in
+                          ("`", "$", "*", "?", "[", "]"))):
+        return None
+    # Quoted or escaped '~' is a literal filename, not home expansion.
+    if "'~" in command or '"~' in command or "\\~" in command:
+        return None
+    if target.startswith("-") and target != "-":
+        return None
+    return target
 
 
 # Full-screen programs must control the terminal directly.  Treat only a
@@ -184,6 +220,7 @@ class App:
         self.cfg = cfg
         self.worker = AiWorker(cfg)
         self.cwd = Path.cwd()
+        self.previous_cwd: Path | None = None
         # The shell-like prompt is derived from the actual host and directory.
         self.hostname = socket.gethostname().split(".")[0] or "mac"
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
@@ -287,7 +324,8 @@ class App:
                 block.output.lines.popleft()
         block.finish(exit_code)
         block.analysis_epoch += 1  # Cancel pending incomplete explanations.
-        self._queue_ai(block)
+        if block.status != "interrupted":
+            self._queue_ai(block)
         self.active = None
         self.direct_input = False
 
@@ -491,18 +529,24 @@ class App:
                 # Launch the existing transparent PTY path instead.
                 self.raw_command = command
                 break
-            elif self.session is None and (command == "cd" or command.startswith("cd ")):
+            elif self.session is None and (target := simple_cd_target(command)) is not None:
                 try:
-                    args = shlex.split(command)
-                    dest = Path(os.path.expandvars(os.path.expanduser(args[1] if len(args) > 1 else "~")))
-                    if not dest.is_absolute():
-                        dest = self.cwd / dest
+                    if target == "-":
+                        if self.previous_cwd is None:
+                            raise ValueError("Нет предыдущей папки для cd -")
+                        dest = self.previous_cwd
+                    else:
+                        dest = Path(os.path.expandvars(os.path.expanduser(target)))
+                        if not dest.is_absolute():
+                            dest = self.cwd / dest
                     dest = dest.resolve(strict=True)
                     if not dest.is_dir():
                         raise NotADirectoryError(dest)
+                    previous = self.cwd
                     self.cwd = dest
+                    self.previous_cwd = previous
                     self.add_block(command, "Папка изменена", str(dest))
-                except (ValueError, OSError, IndexError) as exc:
+                except (ValueError, OSError) as exc:
                     self.add_block(command, "Не удалось перейти в папку", str(exc), "error")
             else:
                 self.start(command, self.last_rows, self.last_cols)
@@ -653,6 +697,7 @@ class App:
             self.cursor = 0
             self.suggestions = ()
             if self.active:
+                self.active.cancel_requested = True
                 if self.session is not None:
                     try:
                         self.session.interrupt()
@@ -691,6 +736,8 @@ class App:
                 if self.line else ""
             )
             self.history.append(command)
+            if len(self.history) > 1000:
+                del self.history[:-1000]  # Keep long sessions bounded in RAM.
             self.hist_pos = len(self.history)
             self.pending.append(command)
             self._run_pending()
@@ -838,8 +885,9 @@ class App:
         # Keep the terminal empty on startup. Blocks appear only after commands.
         viewport: list[tuple[str, int, bool]] = []
         for index, block in enumerate(self.blocks):
-            heading = curses.color_pair(3 if block.status == "error" else 5) | curses.A_BOLD
-            symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
+            heading_color = 3 if block.status == "error" else 4 if block.status == "interrupted" else 5
+            heading = curses.color_pair(heading_color) | curses.A_BOLD
+            symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "–" if block.status == "interrupted" else "!"
             viewport.append((f"{symbol} {block.title}", heading, block.status == "ok"))
             viewport.extend(("  " + line, 0, False) for line in self._wrap(block.explanation, w - 3))
             if block.ai_model:
@@ -1024,6 +1072,7 @@ class App:
 
     def stop(self) -> None:
         self.completion.close()
+        self.worker.close()
         if self.session is not None:
             self.session.stop()
             self.session = None
@@ -1039,6 +1088,32 @@ class App:
         if self.master is not None:
             os.close(self.master)
             self.master = None
+
+
+def read_input_event(stdscr: curses.window, app: App, rows: int, cols: int,
+                     raw_sgr: bool, wheel_decoder: SGRWheelDecoder) -> bool:
+    """Route input including SIGINT as an in-app cancellation, never a TUI crash."""
+    try:
+        key = stdscr.get_wch()
+    except KeyboardInterrupt:
+        # On macOS Python may raise SIGINT here instead of returning Ctrl+C.
+        # Reuse the existing cancellation path (including pending paste/jobs).
+        app.key("\x03", rows, cols)
+        return True
+    except curses.error:
+        return False
+    if raw_sgr:
+        for kind, value in wheel_decoder.feed(key):
+            if kind == "wheel":
+                app.scroll_wheel(str(value), rows)
+            elif kind == "click":
+                x, y = value
+                app.mouse_click(x, y, rows, cols)
+            else:
+                app.key(value, rows, cols)
+    else:
+        app.key(key, rows, cols)
+    return True
 
 
 def run_ui(config: Config) -> None:
@@ -1062,28 +1137,27 @@ def run_ui(config: Config) -> None:
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(20)
+        interrupt_pending = False
+
+        def queue_interrupt(_signum: int, _frame: object) -> None:
+            nonlocal interrupt_pending
+            interrupt_pending = True
+
+        # cbreak can turn Ctrl+C into SIGINT instead of a \x03 key event.
+        # Record the signal and cancel from the main loop, not a signal handler.
+        previous_sigint = signal.signal(signal.SIGINT, queue_interrupt)
         needs_redraw = True
         last_render_at = 0.0
         last_resync_at = time.monotonic()
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
-                try:
-                    key = stdscr.get_wch()
+                needs_redraw = (read_input_event(stdscr, app, h, w, raw_sgr, wheel_decoder)
+                                or needs_redraw)
+                if interrupt_pending:
+                    interrupt_pending = False
+                    app.key("\x03", h, w)
                     needs_redraw = True
-                    if raw_sgr:
-                        for kind, value in wheel_decoder.feed(key):
-                            if kind == "wheel":
-                                app.scroll_wheel(str(value), h)
-                            elif kind == "click":
-                                x, y = value
-                                app.mouse_click(x, y, h, w)
-                            else:
-                                app.key(value, h, w)
-                    else:
-                        app.key(key, h, w)
-                except curses.error:
-                    pass
                 needs_redraw = app.poll() or needs_redraw
                 if getattr(app, "raw_command", ""):
                     command = app.raw_command
@@ -1140,8 +1214,11 @@ def run_ui(config: Config) -> None:
                         last_resync_at = now
                     needs_redraw = False
         finally:
-            configure_mouse(False)
-            set_bracketed_paste(False)
-            app.stop()
+            try:
+                configure_mouse(False)
+                set_bracketed_paste(False)
+                app.stop()
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
 
     curses.wrapper(main)

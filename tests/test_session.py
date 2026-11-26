@@ -141,7 +141,9 @@ class PersistentPTY(unittest.TestCase):
                 time.sleep(.01)
             self.assertIsNone(app.active)
             self.assertIsNotNone(app.session)
-            self.assertEqual(app.blocks[-1].status, 'error')
+            self.assertEqual(app.blocks[-1].status, 'interrupted')
+            self.assertNotEqual(app.blocks[-1].exit_code, 0)
+            self.assertEqual(app.blocks[-1].title, 'Команда прервана')
             app.start('echo shell-preserved', 25, 90)
             for _ in range(300):
                 app.poll()
