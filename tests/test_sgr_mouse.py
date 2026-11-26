@@ -28,8 +28,39 @@ class OldMacSGRWheelTests(unittest.TestCase):
     def test_modifiers_and_no_click_input_leak(self):
         self.assertEqual(self.feed("\x1b[<69;999;123M"), [("wheel", "down")])
         self.assertEqual(self.feed("\x1b[<80;23;60M"), [("wheel", "up")])
-        self.assertEqual(self.feed("\x1b[<0;1;2M"), [])
+        self.assertEqual(self.feed("\x1b[<0;1;2M"), [("click", (0, 1))])
         self.assertEqual(self.feed("\x1b[<65;1;2m"), [])
+
+    def test_left_click_only_on_press_and_never_leaks_as_input(self):
+        self.assertEqual(self.feed("\x1b[<0;10;4M"), [("click", (9, 3))])
+        self.assertEqual(self.feed("\x1b[<0;10;4m"), [])
+        self.assertEqual(self.feed("\x1b[<1;10;4M"), [])  # Right or middle button.
+        self.assertEqual(self.feed("\x1b[<32;10;4M"), [])  # Motion, not click.
+        self.assertEqual(self.feed("\x1b[<4;10;4M"), [])  # Modified press.
+        self.assertEqual(self.feed("\x1b[<0;0;4M"), [])  # Invalid coordinates.
+
+    def test_sgr_left_press_repositions_real_prompt_caret(self):
+        from test_appearance import FakeWindow
+        app = App(load_config(Path("/tmp/terminal-ai-missing-sgr-click")))
+        app.hostname = "MacBook-Air-Fabiian"
+        app.cwd = Path.home()
+        for key in "echo hello":
+            app.key(key, 24, 90)
+        # Mouse reports use the displayed window even when no resize key arrived.
+        screen = FakeWindow(32, 90)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            app.render(screen)
+        x = len(app.prompt()) + 5
+        events = self.feed(f"\x1b[<0;{x + 1};1M")
+        self.assertEqual(events, [("click", (x, 0))])
+        for kind, point in events:
+            if kind == "click":
+                app.mouse_click(*point, 32, 90)
+        self.assertEqual(app.cursor, 5)
+        app.key("X", 24, 90)
+        self.assertEqual(app.line, "echo Xhello")
+        self.assertFalse(app.pending)
+        app.stop()
 
     def test_untrusted_malformed_mouse_event_dropped(self):
         self.assertEqual(self.feed("\x1b[<65;1;xM"), [])

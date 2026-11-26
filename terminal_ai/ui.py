@@ -21,6 +21,7 @@ from .core import AiWorker, Block, Config, ScreenText, explain_rules, simple_rea
 from .session import PersistentShell
 from .paste import PasteDecoder, prepare_pasted_commands
 from .wheel import SGRWheelDecoder
+from .completion import Completion, CompletionWorker, replace_completion, safe_to_complete
 
 
 # The xterm alternate screen separates the TUI from regular shell scrollback.
@@ -46,16 +47,18 @@ def configure_colors(background: int) -> None:
 
 
 def enable_mouse_wheel() -> None:
-    """Request wheel events without capturing clicks or dragging when supported.
+    """Request wheel and left-click events; do not track motion or dragging.
 
     macOS Terminal may instead navigate its own scrollback; its profile's
     `Scroll alternate screen` setting controls that native behavior.
     """
     try:
         curses.mouseinterval(0)
-        wheel = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON5_PRESSED", 0)
-        if wheel:
-            curses.mousemask(wheel)
+        mouse_events = (getattr(curses, "BUTTON4_PRESSED", 0) |
+                        getattr(curses, "BUTTON5_PRESSED", 0) |
+                        getattr(curses, "BUTTON1_PRESSED", 0))
+        if mouse_events:
+            curses.mousemask(mouse_events)
     except (curses.error, AttributeError):
         pass
 
@@ -186,6 +189,8 @@ class App:
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
         self.next_id = 1
         self.line = ""
+        self.cursor = 0  # Character offset in the editable command line.
+        self.input_offset = 0  # Left edge of the visible input for long commands.
         self.pending: deque[str] = deque()
         self.paste_decoder = PasteDecoder()
         self.paste_review: deque[str] = deque()
@@ -198,6 +203,14 @@ class App:
         self.scroll_direction = ""
         self.scroll_last_step = 0.0
         self._cursor_visible: bool | None = None
+        # Last rendered prompt: row, input start column, first visible character, width.
+        self._prompt_click: tuple[int, int, int, int, int] | None = None
+        self.completion = CompletionWorker()
+        self.suggestions: tuple[Completion, ...] = ()
+        self.suggestion_index = 0
+        self._completion_input = ""
+        self._completion_due = 0.0
+        self._completion_suppressed = False
         # Terminal.app may report alternate-screen wheel gestures as arrows.
         self.scroll_wheel_events = 0
         self.scroll_arrow_events = 0
@@ -357,7 +370,55 @@ class App:
             changed = True
         if self._run_pending():
             changed = True
+        if self._update_suggestions():
+            changed = True
         return changed
+
+    def _update_suggestions(self) -> bool:
+        """Debounce external completion work; stale responses never enter UI."""
+        candidate = (self.line if self.cursor == len(self.line)
+                     and not self.direct_input and not self.paste_review
+                     and not self.active and not self.line.lstrip().startswith("/")
+                     and safe_to_complete(self.line) else "")
+        if candidate != self._completion_input:
+            had_suggestions = bool(self.suggestions)
+            self._completion_input = candidate
+            self._completion_due = time.monotonic() + 0.16
+            self._completion_suppressed = False
+            self.suggestions = ()
+            self.suggestion_index = 0
+            return had_suggestions
+        if not candidate or self._completion_suppressed:
+            return False
+        if time.monotonic() >= self._completion_due:
+            self.completion.request(candidate, self.cwd)
+        result = self.completion.collect(candidate, self.cwd)
+        if result is None:
+            return False
+        self.suggestions = result
+        self.suggestion_index = 0
+        return True
+
+    def _accept_suggestion(self) -> None:
+        if not self.suggestions:
+            return
+        choice = self.suggestions[self.suggestion_index]
+        if choice.kind == "folder" and not choice.insert.endswith("/"):
+            choice = Completion(choice.name, choice.insert + "/", choice.kind, choice.description)
+        self.line = replace_completion(self.line, choice)
+        self.cursor = len(self.line)
+        self.suggestions = ()
+        self.suggestion_index = 0
+        # A folder is navigation, not a finished completion. Automatically
+        # refresh its children without the old Space + Backspace workaround.
+        if choice.kind == "folder":
+            self._completion_input = ""
+            self._completion_suppressed = False
+        else:
+            self._completion_input = self.line
+            self._completion_suppressed = True
+        self.scroll = 0
+        self.scroll_target = None
 
     def _queue_ai(self, b: Block, *, force: bool = False) -> None:
         if not self.ai_on or b.exit_code is None:
@@ -390,6 +451,7 @@ class App:
 
     def resize(self, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
+        self._prompt_click = None
         if self.session is not None:
             self.session.resize(rows - 3, cols)
         if self.master is not None:
@@ -455,14 +517,23 @@ class App:
         if self.paste_review:
             self.paste_feedback = "Сначала подтверди или отмени предыдущую вставку (Ctrl+C)."
             return
+        # Insert at the caret, not necessarily at the end. Each pasted
+        # newline remains a separate command requiring explicit Enter.
+        caret = min(self.cursor, len(self.line))
+        suffix = self.line[caret:]
         try:
-            commands = prepare_pasted_commands(text, self.line)
+            commands = prepare_pasted_commands(text, self.line[:caret])
+            if commands:
+                commands[-1] += suffix
+                if len(commands[-1]) > 4096:
+                    raise ValueError("Одна из команд слишком длинная (максимум 4096 символов).")
         except ValueError as exc:
             self.paste_feedback = str(exc)
             return
         if not commands:
             return
         self.line = commands[0]
+        self.cursor = len(commands[0]) - (len(suffix) if len(commands) == 1 else 0)
         self.scroll = 0
         self.scroll_target = None
         self.paste_review.extend(commands[1:])
@@ -482,6 +553,20 @@ class App:
         if direction in ("up", "down"):
             self._queue_scroll(direction)
             self.scroll_wheel_events += 1
+
+    def mouse_click(self, x: int, y: int, rows: int, cols: int) -> None:
+        """Move the input caret on a left click; never execute text or commands."""
+        hit = self._prompt_click
+        if self.direct_input or hit is None:
+            return
+        prompt_y, input_x, first_char, rendered_rows, rendered_cols = hit
+        if (rows != rendered_rows or cols != rendered_cols or
+                y != prompt_y or not input_x <= x < cols - 1):
+            return
+        self.cursor = min(len(self.line), first_char + x - input_x)
+        self.suggestions = ()
+        self._completion_input = ""
+        self.scroll_target = None
 
     def advance_scroll(self, max_scroll: int, now: float | None = None) -> None:
         self.scroll = min(max_scroll, max(0, self.scroll))
@@ -514,17 +599,33 @@ class App:
         self.last_rows, self.last_cols = rows, cols
         if key == curses.KEY_MOUSE:
             try:
-                _, _, _, _, buttons = curses.getmouse()
+                _, x, y, _, buttons = curses.getmouse()
                 if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
                     self.scroll_wheel("up", rows)
                 elif buttons & getattr(curses, "BUTTON5_PRESSED", 0):
                     self.scroll_wheel("down", rows)
+                elif buttons & getattr(curses, "BUTTON1_PRESSED", 0):
+                    self.mouse_click(x, y, rows, cols)
             except curses.error:
                 pass
             return
         if key == curses.KEY_RESIZE:
             self.resize(rows, cols)
             return
+        if self.suggestions:
+            if key == curses.KEY_DOWN:
+                self.suggestion_index = (self.suggestion_index + 1) % len(self.suggestions)
+                return
+            if key == curses.KEY_UP:
+                self.suggestion_index = (self.suggestion_index - 1) % len(self.suggestions)
+                return
+            if key in ("\t", getattr(curses, "KEY_BTAB", -1)):
+                self._accept_suggestion()
+                return
+            if key == "\x1b":
+                self.suggestions = ()
+                self._completion_suppressed = True
+                return
         if key == curses.KEY_PPAGE:
             self.scroll_target = None
             self.scroll += max(1, rows // 2)
@@ -549,6 +650,8 @@ class App:
             self.paste_decoder.reset()
             self.paste_feedback = ""
             self.line = ""
+            self.cursor = 0
+            self.suggestions = ()
             if self.active:
                 if self.session is not None:
                     try:
@@ -582,6 +685,7 @@ class App:
             # Only a real Enter here approves this command. Pasted newlines
             # never reach this branch, even with an active shell process.
             self.line = self.paste_review.popleft() if self.paste_review else ""
+            self.cursor = len(self.line)
             self.paste_feedback = (
                 f"Осталось {len(self.paste_review) + 1} команд: Enter — следующая; Ctrl+C — отменить."
                 if self.line else ""
@@ -590,8 +694,31 @@ class App:
             self.hist_pos = len(self.history)
             self.pending.append(command)
             self._run_pending()
+        elif key in (curses.KEY_LEFT, "\x02"):  # Left / Ctrl+B
+            self.cursor = max(0, self.cursor - 1)
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_RIGHT, "\x06"):  # Right / Ctrl+F
+            self.cursor = min(len(self.line), self.cursor + 1)
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_HOME, "\x01"):  # Home / Ctrl+A
+            self.cursor = 0
+            self.suggestions = ()
+            self._completion_input = ""
+        elif key in (curses.KEY_END, "\x05"):  # End / Ctrl+E
+            self.cursor = len(self.line)
+            self.suggestions = ()
+            self._completion_input = ""
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
-            self.line = self.line[:-1]
+            if self.cursor:
+                self.line = self.line[:self.cursor - 1] + self.line[self.cursor:]
+                self.cursor -= 1
+            self.scroll = 0
+            self.scroll_target = None
+        elif key == curses.KEY_DC:  # Delete the character under the caret.
+            if self.cursor < len(self.line):
+                self.line = self.line[:self.cursor] + self.line[self.cursor + 1:]
             self.scroll = 0
             self.scroll_target = None
         elif key in (curses.KEY_UP, curses.KEY_DOWN) and not self.line and self.blocks:
@@ -603,17 +730,20 @@ class App:
         elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
             self.line = self.history[self.hist_pos]
+            self.cursor = len(self.line)
             self.scroll = 0
             self.scroll_target = None
         elif key in (curses.KEY_DOWN, "\x0e") and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
+            self.cursor = len(self.line)
             self.scroll = 0
             self.scroll_target = None
         elif key == "\x04" and not self.line and self.active is None:
             self.should_exit = True
         elif isinstance(key, str) and key.isprintable() and len(self.line) < 4096:
-            self.line += key
+            self.line = self.line[:self.cursor] + key + self.line[self.cursor:]
+            self.cursor += len(key)
             self.scroll = 0
             self.scroll_target = None
 
@@ -697,6 +827,7 @@ class App:
     def render(self, stdscr: curses.window, force_redraw: bool = False) -> None:
         h, w = stdscr.getmaxyx()
         if h < 7 or w < 25:
+            self._prompt_click = None
             stdscr.erase()
             self._line(stdscr, 0, 0, "Увеличь окно терминала", 0)
             if force_redraw:
@@ -750,14 +881,32 @@ class App:
         if len(review) > preview_slots:
             visible_count = max(0, preview_slots - 1)
         remaining = len(review) - visible_count
-        footer = bool(viewport or self.paste_feedback or self.scroll_debug)
+        footer = bool(viewport or self.paste_feedback)
+        # During scroll diagnostics reserve the bottom row outside the timeline
+        # so wheel/arrow counters stay visible while reviewing earlier output.
+        view_height = h - int(self.scroll_debug)
 
-        prompt = self.prompt()
+        prompt_prefix = self.prompt()
         if self.active:
             mode_hint = "stdin" if self.direct_input else f"очередь {len(self.pending)}"
-            prompt += f"[{mode_hint}] "
-        if not self.direct_input:
-            prompt += self.line
+            prompt_prefix += f"[{mode_hint}] "
+        # Keep the insertion point visible even when the command is wider
+        # than the window, without changing the underlying command text.
+        caret = min(self.cursor, len(self.line))
+        available = max(1, w - 2)
+        prefix = prompt_prefix
+        if len(prefix) >= available:
+            prefix = prefix[-(available - 1):] if available > 1 else ""
+        space = max(1, available - len(prefix))
+        first_char = min(self.input_offset, max(0, len(self.line) - space + 1))
+        if caret < first_char:
+            first_char = caret
+        elif caret >= first_char + space:
+            first_char = caret - space + 1
+        self.input_offset = first_char
+        visible_line = self.line[first_char:first_char + space]
+        prompt = prefix + (visible_line if not self.direct_input else "")
+        cursor_x = min(w - 2, len(prefix) + caret - first_char)
         prompt_index = len(viewport)
         viewport.append((prompt, curses.color_pair(1), False))
         for idx, command in enumerate(review[:visible_count], start=2):
@@ -767,30 +916,36 @@ class App:
         if footer:
             viewport.append(("", curses.color_pair(4), False))
 
-        max_scroll = max(0, len(viewport) - h)
+        max_scroll = max(0, len(viewport) - view_height)
         self.advance_scroll(max_scroll)
         if footer:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
                       "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: свернуть/развернуть  /help")
-            if self.scroll_debug and not self.paste_feedback:
-                status = (f" скролл: колесо={self.scroll_wheel_events} "
-                          f"стрелки={self.scroll_arrow_events} "
-                          f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
             viewport[-1] = (status, curses.color_pair(4), False)
 
         start = max_scroll - self.scroll
-        for y, (line, attr, success) in enumerate(viewport[start:start + h]):
+        for y, (line, attr, success) in enumerate(viewport[start:start + view_height]):
             if success and line.startswith("✓ "):
                 self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
                 self._line(stdscr, y, 1, line[1:], attr)
             else:
                 self._line(stdscr, y, 0, line, attr)
 
-        # Only display the editing cursor when its prompt is in view.
+        # A popup is only an overlay, not another command or history block.
         prompt_y = prompt_index - start
-        prompt_visible = 0 <= prompt_y < h
+        if 0 <= prompt_y < view_height:
+            self._draw_suggestions(stdscr, prompt_y, view_height, w)
+        if self.scroll_debug:
+            debug = (f" скролл: колесо={self.scroll_wheel_events} "
+                     f"стрелки={self.scroll_arrow_events} "
+                     f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
+            self._line(stdscr, h - 1, 0, debug, curses.color_pair(4))
+        # Only display the editing cursor when its prompt is in view.
+        prompt_visible = 0 <= prompt_y < view_height
+        self._prompt_click = ((prompt_y, len(prefix), first_char, h, w)
+                              if prompt_visible and not self.direct_input else None)
         if not self.direct_input:
             if self._cursor_visible is not prompt_visible:
                 try:
@@ -800,7 +955,7 @@ class App:
                     pass
             if prompt_visible:
                 try:
-                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
+                    stdscr.move(prompt_y, cursor_x)
                 except curses.error:
                     pass
         # Cmd+K is handled by Terminal.app, not sent as input. A forced
@@ -808,6 +963,45 @@ class App:
         if force_redraw:
             stdscr.redrawwin()
         stdscr.refresh()
+
+    def _draw_suggestions(self, stdscr: curses.window,
+                          prompt_y: int, height: int, width: int) -> None:
+        """A compact popup with the exact same foreground color as the prompt.
+
+        The symbols are monochrome line glyphs, not emoji or color artwork.
+        """
+        if not self.suggestions or width < 28:
+            return
+        box_width = min(38, width - 3)
+        n = min(5, len(self.suggestions), max(0, height - 3))
+        if n == 0:
+            return
+        box_height = n + 2
+        top = prompt_y + 1 if height - prompt_y - 1 >= box_height else prompt_y - box_height
+        if top < 0:
+            return
+        left = min(max(1, len(self.prompt()) + len(self.line) + 1), width - box_width - 1)
+        blue = curses.color_pair(1)
+        # Keep the selected item visible when moving beyond the five rows
+        # shown at once. These indices refer to the FULL suggestion list.
+        first = max(0, min(self.suggestion_index - n + 1, len(self.suggestions) - n))
+        counter = f" {self.suggestion_index + 1}/{len(self.suggestions)} " if len(self.suggestions) > n else ""
+        self._line(stdscr, top, left,
+                   "╭" + "─" * (box_width - 2 - len(counter)) + counter + "╮", blue)
+        symbols = {"folder": "▱", "file": "▤", "option": "◇", "subcommand": "▸",
+                   "shortcut": "↳", "arg": "·", "command": "›"}
+        for row, suggestion in enumerate(self.suggestions[first:first + n]):
+            index = first + row
+            symbol = symbols.get(suggestion.kind, "›")
+            label = suggestion.name.removesuffix(" (~/)")
+            text = f" {symbol} {label}"
+            text = text[:box_width - 3].ljust(box_width - 2)
+            self._line(stdscr, top + row + 1, left, "│", blue)
+            self._line(stdscr, top + row + 1, left + 1, text,
+                       blue | curses.A_REVERSE if index == self.suggestion_index else blue)
+            self._line(stdscr, top + row + 1, left + box_width - 1, "│", blue)
+        self._line(stdscr, top + box_height - 1, left,
+                   "╰" + "─" * (box_width - 2) + "╯", blue)
 
     @staticmethod
     def _line(stdscr: curses.window, y: int, x: int, text: str, attr: int) -> None:
@@ -829,6 +1023,7 @@ class App:
         return result[:35]
 
     def stop(self) -> None:
+        self.completion.close()
         if self.session is not None:
             self.session.stop()
             self.session = None
@@ -880,6 +1075,9 @@ def run_ui(config: Config) -> None:
                         for kind, value in wheel_decoder.feed(key):
                             if kind == "wheel":
                                 app.scroll_wheel(str(value), h)
+                            elif kind == "click":
+                                x, y = value
+                                app.mouse_click(x, y, h, w)
                             else:
                                 app.key(value, h, w)
                     else:

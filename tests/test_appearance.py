@@ -56,6 +56,63 @@ class ShellAppearance(unittest.TestCase):
         self.assertEqual(screen.writes, [(0, 0, 'MacBook-Air-Fabiian ~ % ', 256)])
         self.assertEqual(screen.cursor, (0, len('MacBook-Air-Fabiian ~ % ')))
 
+    def test_left_right_edit_in_middle_and_update_visual_caret(self):
+        screen = FakeWindow(24, 100)
+        self.app.cwd = Path.home()
+        for ch in "echo test":
+            self.app.key(ch, 24, 100)
+        self.assertEqual(self.app.cursor, len("echo test"))
+        self.app.key(curses.KEY_LEFT, 24, 100)
+        self.app.key(curses.KEY_LEFT, 24, 100)
+        self.render(screen)
+        self.assertEqual(screen.cursor, (0, len(self.app.prompt()) + 7))
+        self.app.key("X", 24, 100)
+        self.assertEqual(self.app.line, "echo teXst")
+        self.assertEqual(self.app.cursor, 8)
+        self.app.key(curses.KEY_BACKSPACE, 24, 100)
+        self.assertEqual(self.app.line, "echo test")
+        self.assertEqual(self.app.cursor, 7)
+        self.app.key(curses.KEY_DC, 24, 100)
+        self.assertEqual(self.app.line, "echo tet")
+        self.assertEqual(self.app.cursor, 7)
+        self.app.key(curses.KEY_RIGHT, 24, 100)
+        self.assertEqual(self.app.cursor, 8)
+
+    def test_home_end_bounds_and_history_caret(self):
+        for ch in "echo test":
+            self.app.key(ch, 24, 100)
+        self.app.key(curses.KEY_HOME, 24, 100)
+        self.app.key(curses.KEY_LEFT, 24, 100)
+        self.assertEqual(self.app.cursor, 0)
+        self.app.key("X", 24, 100)
+        self.assertEqual(self.app.line, "Xecho test")
+        self.app.key("\x05", 24, 100)  # Ctrl+E
+        self.app.key(curses.KEY_RIGHT, 24, 100)
+        self.assertEqual(self.app.cursor, len(self.app.line))
+        self.app.history.append("pwd")
+        self.app.hist_pos = 1
+        self.app.key("\x10", 24, 100)  # Ctrl+P
+        self.assertEqual(self.app.line, "pwd")
+        self.assertEqual(self.app.cursor, 3)
+
+    def test_caret_remains_visible_when_command_is_wider_than_window(self):
+        screen = FakeWindow(24, 40)
+        self.app.cwd = Path.home()
+        for ch in "echo " + "x" * 80:
+            self.app.key(ch, 24, 40)
+        self.render(screen)
+        self.assertLessEqual(screen.cursor[1], 38)
+        self.assertGreaterEqual(screen.cursor[1], len(self.app.prompt()))
+        end_x = screen.cursor[1]
+        self.app.key(curses.KEY_LEFT, 24, 40)
+        self.render(screen)
+        self.assertEqual(screen.cursor[1], end_x - 1)
+        for _ in range(74):
+            self.app.key(curses.KEY_LEFT, 24, 40)
+        self.render(screen)
+        self.assertLessEqual(screen.cursor[1], 38)
+        self.assertTrue(any(line.startswith(self.app.prompt()) for _, _, line, _ in screen.writes))
+
     def test_blocks_are_inserted_above_following_prompt(self):
         screen = FakeWindow()
         block = self.app.add_block('echo hi', 'Заглушка', '')

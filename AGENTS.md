@@ -14,7 +14,7 @@ This repository implements a local-first Terminal AI CLI for macOS. Work on the 
 - Treat command output and model responses as untrusted. Never execute model text, embed credentials, bypass TLS or follow redirects containing tokens. Remote server use must be explicitly configured, with secure defaults.
 - Avoid storing raw transcripts by default; use bounded in-memory buffers. Redaction is best effort, so do not claim it guarantees secrecy.
 - Avoid false success claims based on partial logs. Exit code 0 means the process succeeded as a process, not that its result was correct.
-- Preserve real terminal interactivity. Full-screen TUI compatibility is currently limited to `:raw`. Do not claim Codex CLI integration is complete until tested.
+- Preserve real terminal interactivity. Known full-screen programs (including `codex`, `vim`, `nvim`, `nano`, `htop`, `btop`) are routed automatically to a direct TUI handoff; `/raw COMMAND` remains an explicit fallback. This does **not** mean Codex internal events are captured or explained live. Do not claim full Codex compatibility without a real macOS Codex test.
 
 ## Definition of done
 
