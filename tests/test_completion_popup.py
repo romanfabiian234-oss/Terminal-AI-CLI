@@ -52,6 +52,71 @@ class CompletionBridgeTests(unittest.TestCase):
         self.assertEqual([x.name for x in matching_completions("gi", options)],
                          ["git", "git-flow"])
 
+    def test_cd_suggests_only_folders(self):
+        options = (Completion("main.py", "main.py", "file"),
+                   Completion("src", "src/", "folder"),
+                   Completion("README.md", "README.md", "file"),
+                   Completion("Downloads", "Downloads/", "folder"))
+        self.assertEqual([x.name for x in matching_completions("cd ", options)],
+                         ["src", "Downloads"])
+        self.assertEqual([x.name for x in matching_completions("cd Do", options)],
+                         ["Downloads"])
+        # Preserve Inshellisense options for special directory navigation.
+        self.assertEqual(matching_completions("cd -", (Completion("-", "-", "arg"),)),
+                         (Completion("-", "-", "arg"),))
+
+    def test_python_prefers_py_scripts_then_folders(self):
+        options = (Completion("reports", "reports/", "folder"),
+                   Completion("README.md", "README.md", "file"),
+                   Completion("train.py", "train.py", "file"),
+                   Completion("logs", "logs/", "folder"),
+                   Completion("build.sh", "build.sh", "file"),
+                   Completion("test.py", "test.py", "arg"))
+        expected = ["train.py", "test.py", "reports", "logs"]
+        for executable in ("python3", "python", "python3.15", "/usr/bin/python3"):
+            with self.subTest(executable=executable):
+                self.assertEqual(
+                    [x.name for x in matching_completions(executable + " ", options)],
+                    expected,
+                )
+        self.assertEqual([x.name for x in matching_completions("python3 te", options)],
+                         ["test.py"])
+
+    def test_python_options_and_script_arguments_are_untouched(self):
+        options = (Completion("-m", "-m", "option"),
+                   Completion("requests", "requests", "arg"),
+                   Completion("readme.md", "readme.md", "file"))
+        self.assertEqual(matching_completions("python3 -m ", options), options)
+        self.assertEqual(matching_completions("python3 main.py ", options), options)
+        self.assertEqual(matching_completions("git ", options), options)
+
+    def test_python_without_script_suggestions_still_shows_folders(self):
+        options = (Completion("README.md", "README.md", "file"),
+                   Completion("src", "src/", "folder"))
+        self.assertEqual([x.name for x in matching_completions("python3 ", options)],
+                         ["src"])
+        self.assertEqual([x.name for x in matching_completions("python3", options)],
+                         [])
+
+    def test_inshellisense_json_uses_context_filter(self):
+        fake = subprocess.CompletedProcess(
+            ["is", "complete", "python3 "], 0,
+            json.dumps({"suggestions": [
+                {"name": "README.md", "type": "file"},
+                {"name": "src", "type": "folder", "insertValue": "src/"},
+                {"name": "run.py", "type": "file"},
+            ]}), "",
+        )
+        with patch("terminal_ai.completion.subprocess.run", return_value=fake):
+            worker = CompletionWorker(binary="/opt/homebrew/bin/is")
+            try:
+                worker.request("python3 ", Path("/tmp"))
+                worker._future.result(timeout=3)
+                result = worker.collect("python3 ", Path("/tmp"))
+                self.assertEqual([x.name for x in result], ["run.py", "src"])
+            finally:
+                worker.close()
+
     def test_malformed_untrusted_response_cannot_crash(self):
         self.assertEqual(parse_completions("invalid"), ())
         self.assertEqual(parse_completions('{"suggestions":null}'), ())
