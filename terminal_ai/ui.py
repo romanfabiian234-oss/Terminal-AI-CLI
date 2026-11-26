@@ -117,7 +117,39 @@ def is_meta_command(command: str) -> bool:
     if not parts:
         return False
     name = parts[0]
-    return name.startswith(":") or (name.startswith("/") and name[1:] in SLASH_COMMANDS)
+    # ':' by itself is a valid POSIX shell no-op; only known aliases are app commands.
+    return (len(name) > 1 and name[0] in ":/" and
+            name[1:] in SLASH_COMMANDS)
+
+
+def simple_cd_target(command: str) -> str | None:
+    """Return the argument only for a standalone, supported cd builtin.
+
+    A compound command, redirect, multiple argument, substitution or glob must
+    reach the actual shell instead of silently dropping part of the command.
+    Punctuation-aware tokenization preserves quoted directory names.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        lexer.commenters = "#"
+        parts = list(lexer)
+    except ValueError:
+        return None
+    if not parts or parts[0] != "cd":
+        return None
+    args = parts[1:]
+    if args and args[0] == "--":
+        args = args[1:]
+    if len(args) > 1:
+        return None
+    target = args[0] if args else "~"
+    # Shell operators/expansions can have side effects and need shell semantics.
+    if any(pattern in target for pattern in ("`", "$(", "*", "?", "[", "]")):
+        return None
+    if target.startswith("-") and target != "-":
+        return None
+    return target
 
 
 # Full-screen programs must control the terminal directly.  Treat only a
@@ -184,6 +216,7 @@ class App:
         self.cfg = cfg
         self.worker = AiWorker(cfg)
         self.cwd = Path.cwd()
+        self.previous_cwd: Path | None = None
         # The shell-like prompt is derived from the actual host and directory.
         self.hostname = socket.gethostname().split(".")[0] or "mac"
         self.blocks: deque[Block] = deque(maxlen=cfg.max_blocks)
@@ -491,18 +524,24 @@ class App:
                 # Launch the existing transparent PTY path instead.
                 self.raw_command = command
                 break
-            elif self.session is None and (command == "cd" or command.startswith("cd ")):
+            elif self.session is None and (target := simple_cd_target(command)) is not None:
                 try:
-                    args = shlex.split(command)
-                    dest = Path(os.path.expandvars(os.path.expanduser(args[1] if len(args) > 1 else "~")))
-                    if not dest.is_absolute():
-                        dest = self.cwd / dest
+                    if target == "-":
+                        if self.previous_cwd is None:
+                            raise ValueError("Нет предыдущей папки для cd -")
+                        dest = self.previous_cwd
+                    else:
+                        dest = Path(os.path.expandvars(os.path.expanduser(target)))
+                        if not dest.is_absolute():
+                            dest = self.cwd / dest
                     dest = dest.resolve(strict=True)
                     if not dest.is_dir():
                         raise NotADirectoryError(dest)
+                    previous = self.cwd
                     self.cwd = dest
+                    self.previous_cwd = previous
                     self.add_block(command, "Папка изменена", str(dest))
-                except (ValueError, OSError, IndexError) as exc:
+                except (ValueError, OSError) as exc:
                     self.add_block(command, "Не удалось перейти в папку", str(exc), "error")
             else:
                 self.start(command, self.last_rows, self.last_cols)
