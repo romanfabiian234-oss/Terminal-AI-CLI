@@ -920,7 +920,8 @@ def run_ui(config: Config) -> None:
                 # Terminal.app's Cmd+K clears its display without notifying
                 # curses. Periodically invalidate its cached screen so the UI
                 # recovers without a resize or another keypress.
-                resync = now - last_resync_at >= 1.0
+                # Avoid a full repaint during active wheel animation.
+                resync = not app.is_scrolling and now - last_resync_at >= 1.0
                 if (needs_redraw or app.is_scrolling or resync) and now - last_render_at >= 0.02:
                     app.render(stdscr, force_redraw=resync)
                     last_render_at = now
