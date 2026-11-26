@@ -462,6 +462,8 @@ class App:
         if not commands:
             return
         self.line = commands[0]
+        self.scroll = 0
+        self.scroll_target = None
         self.paste_review.extend(commands[1:])
         self.paste_feedback = f"Вставлено {len(commands)} команд: Enter — выполнить одну; Ctrl+C — отменить."
 
@@ -589,6 +591,8 @@ class App:
             self._run_pending()
         elif key in ("\x08", "\x7f", curses.KEY_BACKSPACE):
             self.line = self.line[:-1]
+            self.scroll = 0
+            self.scroll_target = None
         elif key in (curses.KEY_UP, curses.KEY_DOWN) and not self.line and self.blocks:
             # Apple Terminal's "Scroll alternate screen" can turn the trackpad
             # into repeated arrow keys rather than KEY_MOUSE. While the prompt
@@ -598,13 +602,19 @@ class App:
         elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
             self.line = self.history[self.hist_pos]
+            self.scroll = 0
+            self.scroll_target = None
         elif key in (curses.KEY_DOWN, "\x0e") and self.history:
             self.hist_pos = min(len(self.history), self.hist_pos + 1)
             self.line = self.history[self.hist_pos] if self.hist_pos < len(self.history) else ""
+            self.scroll = 0
+            self.scroll_target = None
         elif key == "\x04" and not self.line and self.active is None:
             self.should_exit = True
         elif isinstance(key, str) and key.isprintable() and len(self.line) < 4096:
             self.line += key
+            self.scroll = 0
+            self.scroll_target = None
 
     def meta(self, command: str) -> None:
         parts = command.split()
@@ -730,32 +740,16 @@ class App:
             if index < len(self.blocks) - 1:
                 viewport.append(("", 0, False))
 
-        # Show every queued pasted command below the editable prompt when room
-        # permits. Reserve vertical space rather than obscuring the history or
-        # pretending that the pasted newlines were already confirmed.
+        # Put the prompt in the SAME scrollable timeline as command output.
+        # When viewing earlier output, the prompt must scroll out of view:
+        # it cannot appear after line 55 of a 150-line result.
         review = list(self.paste_review)
         preview_slots = max(0, h - 4)
         visible_count = min(len(review), preview_slots)
         if len(review) > preview_slots:
-            visible_count = max(0, preview_slots - 1)  # Summary row for the rest.
+            visible_count = max(0, preview_slots - 1)
         remaining = len(review) - visible_count
         footer = bool(viewport or self.paste_feedback or self.scroll_debug)
-        # Follow the last output line like an ordinary shell. Only occupy the
-        # bottom of the screen once the command history fills the viewport.
-        # Reserve the space for paste review and status after the prompt.
-        reserved = visible_count + (1 if remaining else 0) + int(footer)
-        history_height = max(0, h - 1 - reserved)
-        prompt_y = min(len(viewport), history_height)
-        max_scroll = max(0, len(viewport) - prompt_y)
-        self.advance_scroll(max_scroll)
-        start = max_scroll - self.scroll
-        visible = viewport[start:start + prompt_y]
-        for y, (line, attr, success) in enumerate(visible):
-            if success and line.startswith("✓ "):
-                self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
-                self._line(stdscr, y, 1, line[1:], attr)
-            else:
-                self._line(stdscr, y, 0, line, attr)
 
         prompt = self.prompt()
         if self.active:
@@ -763,17 +757,18 @@ class App:
             prompt += f"[{mode_hint}] "
         if not self.direct_input:
             prompt += self.line
-        # Paste previews follow the editable prompt; no command executes
-        # until the user confirms it with Enter.
-        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
-        next_row = prompt_y + 1
+        prompt_index = len(viewport)
+        viewport.append((prompt, curses.color_pair(1), False))
         for idx, command in enumerate(review[:visible_count], start=2):
-            self._line(stdscr, next_row, 0, f"  {idx}. {command}", curses.color_pair(4))
-            next_row += 1
+            viewport.append((f"  {idx}. {command}", curses.color_pair(4), False))
         if remaining:
-            self._line(stdscr, next_row, 0, f"  … ещё {remaining} команд", curses.color_pair(4))
-            next_row += 1
-        if footer and next_row < h:
+            viewport.append((f"  … ещё {remaining} команд", curses.color_pair(4), False))
+        if footer:
+            viewport.append(("", curses.color_pair(4), False))
+
+        max_scroll = max(0, len(viewport) - h)
+        self.advance_scroll(max_scroll)
+        if footer:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
@@ -782,11 +777,24 @@ class App:
                 status = (f" скролл: колесо={self.scroll_wheel_events} "
                           f"стрелки={self.scroll_arrow_events} "
                           f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
-            self._line(stdscr, next_row, 0, status, curses.color_pair(4))
+            viewport[-1] = (status, curses.color_pair(4), False)
+
+        start = max_scroll - self.scroll
+        for y, (line, attr, success) in enumerate(viewport[start:start + h]):
+            if success and line.startswith("✓ "):
+                self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
+                self._line(stdscr, y, 1, line[1:], attr)
+            else:
+                self._line(stdscr, y, 0, line, attr)
+
+        # Only display the editing cursor when its prompt is in view.
+        prompt_y = prompt_index - start
+        prompt_visible = 0 <= prompt_y < h
         if not self.direct_input:
-            cursor_x = min(w - 2, len(prompt))
             try:
-                stdscr.move(prompt_y, cursor_x)
+                curses.curs_set(1 if prompt_visible else 0)
+                if prompt_visible:
+                    stdscr.move(prompt_y, min(w - 2, len(prompt)))
             except curses.error:
                 pass
         # Cmd+K is handled by Terminal.app, not sent as input. A forced
