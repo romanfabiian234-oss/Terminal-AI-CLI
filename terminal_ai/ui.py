@@ -204,7 +204,7 @@ class App:
         self.scroll_last_step = 0.0
         self._cursor_visible: bool | None = None
         # Last rendered prompt: row, input start column, first visible character, width.
-        self._prompt_click: tuple[int, int, int, int] | None = None
+        self._prompt_click: tuple[int, int, int, int, int] | None = None
         self.completion = CompletionWorker()
         self.suggestions: tuple[Completion, ...] = ()
         self.suggestion_index = 0
@@ -559,9 +559,9 @@ class App:
         hit = self._prompt_click
         if self.direct_input or hit is None:
             return
-        prompt_y, input_x, first_char, width = hit
-        if (rows != self.last_rows or cols != width or
-                y != prompt_y or not input_x <= x < width - 1):
+        prompt_y, input_x, first_char, rendered_rows, rendered_cols = hit
+        if (rows != rendered_rows or cols != rendered_cols or
+                y != prompt_y or not input_x <= x < cols - 1):
             return
         self.cursor = min(len(self.line), first_char + x - input_x)
         self.suggestions = ()
@@ -940,7 +940,7 @@ class App:
             self._draw_suggestions(stdscr, prompt_y, h, w)
         # Only display the editing cursor when its prompt is in view.
         prompt_visible = 0 <= prompt_y < h
-        self._prompt_click = ((prompt_y, len(prefix), first_char, w)
+        self._prompt_click = ((prompt_y, len(prefix), first_char, h, w)
                               if prompt_visible and not self.direct_input else None)
         if not self.direct_input:
             if self._cursor_visible is not prompt_visible:
