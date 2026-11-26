@@ -41,6 +41,8 @@ class ShellSemantics(unittest.TestCase):
             "cd /tmp && echo second", "cd /tmp\npwd",
             'cd "$(pwd)"', "cd /tmp/*.txt", "cd -P /tmp",
             "cd /tmp /var", 'cd "unterminated',
+            "cd $HOME", "cd '$HOME'", "cd \"\"", "cd ''",
+            'cd "~/Documents"', "cd \\~",
         )
         for command in unsafe_to_intercept:
             with self.subTest(command=command):
