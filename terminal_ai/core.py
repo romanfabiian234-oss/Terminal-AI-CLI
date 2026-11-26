@@ -375,13 +375,16 @@ class AiWorker:
     """Single worker; UI keeps running independently of slow or offline servers."""
     def __init__(self, config: Config):
         self.config = config
-        self.requests: Queue[tuple[int, int, ModelProfile, str, str, int | None, str]] = Queue(maxsize=3)
+        self.requests: Queue[tuple[int, int, ModelProfile, str, str, int | None, str] | None] = Queue(maxsize=3)
         self.events: Queue[tuple[int, int, str, str]] = Queue()
+        self.closed = threading.Event()
         self.thread = threading.Thread(target=self._work, name="terminal-ai-model", daemon=True)
         self.thread.start()
 
     def submit(self, block: Block, *, source: Block | None = None) -> bool:
         """Route model output to block; optionally explain a different source block."""
+        if self.closed.is_set():
+            return False
         epoch = block.analysis_epoch + 1
         origin = source if source is not None else block
         item = (block.id, epoch, self.config.profile(), origin.command,
@@ -396,7 +399,7 @@ class AiWorker:
     def _work(self) -> None:
         while True:
             item = self.requests.get()
-            if item is None:
+            if item is None or self.closed.is_set():
                 return
             block_id, epoch, profile, command, output, code, language = item
             started = time.monotonic()
@@ -418,6 +421,22 @@ class AiWorker:
             finally:
                 # Time spent in this worker handling the model request (not queue wait).
                 self.events.put((block_id, epoch, "timing", f"{time.monotonic() - started:.3f}"))
+
+    def close(self) -> None:
+        """Stop accepting work and wake the worker without blocking terminal exit."""
+        if self.closed.is_set():
+            return
+        self.closed.set()
+        # Pending inferences are irrelevant once the UI is closed.
+        while True:
+            try:
+                self.requests.put_nowait(None)
+                return
+            except Full:
+                try:
+                    self.requests.get_nowait()
+                except Empty:
+                    continue
 
     def drain(self) -> list[tuple[int, int, str, str]]:
         result = []
