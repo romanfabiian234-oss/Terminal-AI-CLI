@@ -683,11 +683,13 @@ class App:
         else:
             self.add_block(command, "Неизвестная команда", "Используй /help", "error")
 
-    def render(self, stdscr: curses.window) -> None:
+    def render(self, stdscr: curses.window, force_redraw: bool = False) -> None:
         h, w = stdscr.getmaxyx()
         if h < 7 or w < 25:
             stdscr.erase()
             self._line(stdscr, 0, 0, "Увеличь окно терминала", 0)
+            if force_redraw:
+                stdscr.redrawwin()
             stdscr.refresh()
             return
         stdscr.erase()
@@ -734,17 +736,23 @@ class App:
         if len(review) > preview_slots:
             visible_count = max(0, preview_slots - 1)  # Summary row for the rest.
         remaining = len(review) - visible_count
-        footer = bool(viewport or self.paste_feedback)
-        reserved = visible_count + (1 if remaining else 0) + int(footer)
-        # Like a shell, the prompt follows the timeline, with room for review.
-        prompt_y = min(max(0, h - 1 - reserved), len(viewport)) if viewport else 0
-        # Clamp at the real content boundary. Previously self.scroll kept
-        # growing after the first line, so downward wheel events appeared stuck
-        # until that invisible overscroll had been consumed.
-        max_scroll = max(0, len(viewport) - prompt_y)
+        footer = bool(viewport or self.paste_feedback or self.scroll_debug)
+        # Keep the editable shell prompt on the LAST terminal row. Put the
+        # optional status and unconfirmed pasted commands immediately above it.
+        prompt_y = h - 1
+        status_y = h - 2 if footer else None
+        preview_end = status_y if status_y is not None else prompt_y
+        preview_start = preview_end - visible_count - (1 if remaining else 0)
+        history_height = max(0, preview_start)
+        max_scroll = max(0, len(viewport) - history_height)
         self.advance_scroll(max_scroll)
         start = max_scroll - self.scroll
-        for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
+        visible = viewport[start:start + history_height]
+        # As the first commands arrive, keep the blocks directly above the
+        # prompt instead of leaving an empty gap between output and input.
+        top = max(0, history_height - len(visible))
+        for index, (line, attr, success) in enumerate(visible):
+            y = top + index
             if success and line.startswith("✓ "):
                 self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
                 self._line(stdscr, y, 1, line[1:], attr)
@@ -757,17 +765,16 @@ class App:
             prompt += f"[{mode_hint}] "
         if not self.direct_input:
             prompt += self.line
-        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
-        # The first pasted command remains editable in the real prompt.
-        # Display the rest as a numbered preview: nothing runs until Enter.
-        next_row = prompt_y + 1
+        # The first pasted command remains editable in the bottom prompt.
+        # Display the others directly above the status; none executes on paste.
+        next_row = preview_start
         for idx, command in enumerate(review[:visible_count], start=2):
             self._line(stdscr, next_row, 0, f"  {idx}. {command}", curses.color_pair(4))
             next_row += 1
         if remaining:
             self._line(stdscr, next_row, 0, f"  … ещё {remaining} команд", curses.color_pair(4))
             next_row += 1
-        if footer and next_row < h:
+        if footer and status_y is not None:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
@@ -776,13 +783,18 @@ class App:
                 status = (f" скролл: колесо={self.scroll_wheel_events} "
                           f"стрелки={self.scroll_arrow_events} "
                           f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
-            self._line(stdscr, next_row, 0, status, curses.color_pair(4))
+            self._line(stdscr, status_y, 0, status, curses.color_pair(4))
+        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
             try:
                 stdscr.move(prompt_y, cursor_x)
             except curses.error:
                 pass
+        # Cmd+K is handled by Terminal.app, not sent as input. A forced
+        # refresh makes curses repaint after the host clears its screen.
+        if force_redraw:
+            stdscr.redrawwin()
         stdscr.refresh()
 
     @staticmethod
@@ -845,6 +857,7 @@ def run_ui(config: Config) -> None:
         stdscr.timeout(20)
         needs_redraw = True
         last_render_at = 0.0
+        last_resync_at = time.monotonic()
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
@@ -904,9 +917,15 @@ def run_ui(config: Config) -> None:
                         needs_redraw = True
                 # Batch fragmented SGR packets; repaint at most 50 fps.
                 now = time.monotonic()
-                if (needs_redraw or app.is_scrolling) and now - last_render_at >= 0.02:
-                    app.render(stdscr)
+                # Terminal.app's Cmd+K clears its display without notifying
+                # curses. Periodically invalidate its cached screen so the UI
+                # recovers without a resize or another keypress.
+                resync = now - last_resync_at >= 1.0
+                if (needs_redraw or app.is_scrolling or resync) and now - last_render_at >= 0.02:
+                    app.render(stdscr, force_redraw=resync)
                     last_render_at = now
+                    if resync:
+                        last_resync_at = now
                     needs_redraw = False
         finally:
             configure_mouse(False)
