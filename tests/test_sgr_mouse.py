@@ -50,7 +50,7 @@ class OldMacSGRWheelTests(unittest.TestCase):
         with patch("terminal_ai.ui.curses.color_pair", return_value=0):
             app.render(screen)
         x = len(app.prompt()) + 5
-        events = self.feed(f"\\x1b[<0;{x + 1};1M")
+        events = self.feed(f"\x1b[<0;{x + 1};1M")
         self.assertEqual(events, [("click", (x, 0))])
         for kind, point in events:
             if kind == "click":
