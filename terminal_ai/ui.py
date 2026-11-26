@@ -396,6 +396,8 @@ class App:
         if not self.suggestions:
             return
         choice = self.suggestions[self.suggestion_index]
+        if choice.kind == "folder" and not choice.insert.endswith("/"):
+            choice = Completion(choice.name, choice.insert + "/", choice.kind, choice.description)
         self.line = replace_completion(self.line, choice)
         self.suggestions = ()
         self.suggestion_index = 0
