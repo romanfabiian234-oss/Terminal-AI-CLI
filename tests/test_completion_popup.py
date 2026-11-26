@@ -41,7 +41,10 @@ class CompletionBridgeTests(unittest.TestCase):
         options = (Completion("Downloads", "Downloads/", "folder"),
                    Completion("Documents", "Documents/", "folder"))
         self.assertEqual(matching_completions("cd ", options), options)
+        # "Do" is ambiguous: both Downloads and Documents should remain.
         self.assertEqual([x.name for x in matching_completions("cd ~/Do", options)],
+                         ["Downloads", "Documents"])
+        self.assertEqual([x.name for x in matching_completions("cd ~/Doc", options)],
                          ["Documents"])
         self.assertEqual([x.name for x in matching_completions("cd ~/Down", options)],
                          ["Downloads"])
