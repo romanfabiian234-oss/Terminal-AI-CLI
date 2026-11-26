@@ -881,7 +881,10 @@ class App:
         if len(review) > preview_slots:
             visible_count = max(0, preview_slots - 1)
         remaining = len(review) - visible_count
-        footer = bool(viewport or self.paste_feedback or self.scroll_debug)
+        footer = bool(viewport or self.paste_feedback)
+        # During scroll diagnostics reserve the bottom row outside the timeline
+        # so wheel/arrow counters stay visible while reviewing earlier output.
+        view_height = h - int(self.scroll_debug)
 
         prompt_prefix = self.prompt()
         if self.active:
@@ -913,21 +916,17 @@ class App:
         if footer:
             viewport.append(("", curses.color_pair(4), False))
 
-        max_scroll = max(0, len(viewport) - h)
+        max_scroll = max(0, len(viewport) - view_height)
         self.advance_scroll(max_scroll)
         if footer:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
                       "   Ctrl+G: stdin  Ctrl+C: отмена  Ctrl+T: свернуть/развернуть  /help")
-            if self.scroll_debug and not self.paste_feedback:
-                status = (f" скролл: колесо={self.scroll_wheel_events} "
-                          f"стрелки={self.scroll_arrow_events} "
-                          f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
             viewport[-1] = (status, curses.color_pair(4), False)
 
         start = max_scroll - self.scroll
-        for y, (line, attr, success) in enumerate(viewport[start:start + h]):
+        for y, (line, attr, success) in enumerate(viewport[start:start + view_height]):
             if success and line.startswith("✓ "):
                 self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
                 self._line(stdscr, y, 1, line[1:], attr)
@@ -936,10 +935,15 @@ class App:
 
         # A popup is only an overlay, not another command or history block.
         prompt_y = prompt_index - start
-        if 0 <= prompt_y < h:
-            self._draw_suggestions(stdscr, prompt_y, h, w)
+        if 0 <= prompt_y < view_height:
+            self._draw_suggestions(stdscr, prompt_y, view_height, w)
+        if self.scroll_debug:
+            debug = (f" скролл: колесо={self.scroll_wheel_events} "
+                     f"стрелки={self.scroll_arrow_events} "
+                     f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
+            self._line(stdscr, h - 1, 0, debug, curses.color_pair(4))
         # Only display the editing cursor when its prompt is in view.
-        prompt_visible = 0 <= prompt_y < h
+        prompt_visible = 0 <= prompt_y < view_height
         self._prompt_click = ((prompt_y, len(prefix), first_char, h, w)
                               if prompt_visible and not self.direct_input else None)
         if not self.direct_input:
