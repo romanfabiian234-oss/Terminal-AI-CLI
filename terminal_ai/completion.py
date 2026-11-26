@@ -69,23 +69,44 @@ def parse_completions(payload: str, limit: int = 7) -> tuple[Completion, ...]:
 
 
 def matching_completions(line: str, choices: tuple[Completion, ...], limit: int = 7) -> tuple[Completion, ...]:
-    """Avoid suggesting unrelated paths while the executable name is unfinished.
+    """Match the current token, then apply narrow command-specific filtering."""
+    if not line:
+        return choices[:limit]
 
-    Inshellisense may provide positional arguments even before the user has
-    typed a space. Never replace "python3" with "reports" or another folder.
-    """
-    if not line or line[-1].isspace():
-        return choices[:limit]
-    partial = line.split()[-1].lstrip("'\\\"")
-    # Match a basename for paths like "cd ~/Doc", but the full insertion
-    # may also be an absolute or relative path.
-    basename = partial.rsplit("/", 1)[-1].casefold()
-    if not basename:
-        return choices[:limit]
-    return tuple(choice for choice in choices
-                 if choice.name.casefold().startswith(basename)
-                 or choice.insert.casefold().startswith(partial.casefold())
-                 or choice.insert.rsplit("/", 1)[-1].casefold().startswith(basename))[:limit]
+    # Keep Inshellisense's original order for unrelated commands.
+    parts = line.strip().split(maxsplit=1)
+    command = parts[0].rsplit("/", 1)[-1] if parts else ""
+    has_arguments = len(line.lstrip().split(maxsplit=1)) > 1 or line.endswith(" ")
+    argument = line.strip().split(maxsplit=1)[1] if len(parts) > 1 else ""
+    context = None
+    if has_arguments and command == "cd" and not argument.startswith("-"):
+        context = "directory"
+    elif (has_arguments and re.fullmatch(r"python(?:2|3)?(?:\\.\\d+)?", command)
+          and not argument.startswith("-") and len(argument.split()) <= 1):
+        context = "python_script"
+
+    if line[-1].isspace():
+        matched = choices
+    else:
+        partial = line.split()[-1].lstrip("'\\\"")
+        basename = partial.rsplit("/", 1)[-1].casefold()
+        matched = tuple(choice for choice in choices
+                        if (not basename or choice.name.casefold().startswith(basename)
+                            or choice.insert.casefold().startswith(partial.casefold())
+                            or choice.insert.rsplit("/", 1)[-1].casefold().startswith(basename)))
+
+    if context == "directory":
+        return tuple(choice for choice in matched
+                     if choice.kind == "folder" or choice.insert.endswith("/"))[:limit]
+    if context == "python_script":
+        scripts = tuple(choice for choice in matched
+                        if choice.kind != "folder" and
+                        (choice.name.casefold().endswith(".py") or
+                         choice.insert.casefold().endswith(".py")))
+        folders = tuple(choice for choice in matched
+                        if choice.kind == "folder" or choice.insert.endswith("/"))
+        return (scripts + folders)[:limit]
+    return matched[:limit]
 
 
 def replace_completion(line: str, choice: Completion) -> str:
