@@ -28,8 +28,16 @@ class OldMacSGRWheelTests(unittest.TestCase):
     def test_modifiers_and_no_click_input_leak(self):
         self.assertEqual(self.feed("\x1b[<69;999;123M"), [("wheel", "down")])
         self.assertEqual(self.feed("\x1b[<80;23;60M"), [("wheel", "up")])
-        self.assertEqual(self.feed("\x1b[<0;1;2M"), [])
+        self.assertEqual(self.feed("\x1b[<0;1;2M"), [("click", (0, 1))])
         self.assertEqual(self.feed("\x1b[<65;1;2m"), [])
+
+    def test_left_click_only_on_press_and_never_leaks_as_input(self):
+        self.assertEqual(self.feed("\x1b[<0;10;4M"), [("click", (9, 3))])
+        self.assertEqual(self.feed("\x1b[<0;10;4m"), [])
+        self.assertEqual(self.feed("\x1b[<1;10;4M"), [])  # Right or middle button.
+        self.assertEqual(self.feed("\x1b[<32;10;4M"), [])  # Motion, not click.
+        self.assertEqual(self.feed("\x1b[<4;10;4M"), [])  # Modified press.
+        self.assertEqual(self.feed("\x1b[<0;0;4M"), [])  # Invalid coordinates.
 
     def test_untrusted_malformed_mouse_event_dropped(self):
         self.assertEqual(self.feed("\x1b[<65;1;xM"), [])
