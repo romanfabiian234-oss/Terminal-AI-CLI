@@ -214,6 +214,7 @@ class Block:
     explanation: str = ""
     status: str = "running"
     exit_code: int | None = None
+    cancel_requested: bool = False
     expanded: bool = True  # Show every output line by default; Ctrl+T collapses on demand.
     started: float = field(default_factory=time.monotonic)
     analysed: bool = False
@@ -225,6 +226,11 @@ class Block:
 
     def finish(self, exit_code: int) -> None:
         self.exit_code = exit_code
+        if self.cancel_requested and exit_code != 0:
+            self.status = "interrupted"
+            self.title = "Команда прервана"
+            self.explanation = "Выполнение остановлено командой Ctrl+C."
+            return
         self.status = "ok" if exit_code == 0 else "error"
         self.title, self.explanation = explain_rules(self.command, self.output.excerpt(), exit_code)
 
