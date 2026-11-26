@@ -737,22 +737,17 @@ class App:
             visible_count = max(0, preview_slots - 1)  # Summary row for the rest.
         remaining = len(review) - visible_count
         footer = bool(viewport or self.paste_feedback or self.scroll_debug)
-        # Keep the editable shell prompt on the LAST terminal row. Put the
-        # optional status and unconfirmed pasted commands immediately above it.
-        prompt_y = h - 1
-        status_y = h - 2 if footer else None
-        preview_end = status_y if status_y is not None else prompt_y
-        preview_start = preview_end - visible_count - (1 if remaining else 0)
-        history_height = max(0, preview_start)
-        max_scroll = max(0, len(viewport) - history_height)
+        # Follow the last output line like an ordinary shell. Only occupy the
+        # bottom of the screen once the command history fills the viewport.
+        # Reserve the space for paste review and status after the prompt.
+        reserved = visible_count + (1 if remaining else 0) + int(footer)
+        history_height = max(0, h - 1 - reserved)
+        prompt_y = min(len(viewport), history_height)
+        max_scroll = max(0, len(viewport) - prompt_y)
         self.advance_scroll(max_scroll)
         start = max_scroll - self.scroll
-        visible = viewport[start:start + history_height]
-        # As the first commands arrive, keep the blocks directly above the
-        # prompt instead of leaving an empty gap between output and input.
-        top = max(0, history_height - len(visible))
-        for index, (line, attr, success) in enumerate(visible):
-            y = top + index
+        visible = viewport[start:start + prompt_y]
+        for y, (line, attr, success) in enumerate(visible):
             if success and line.startswith("✓ "):
                 self._line(stdscr, y, 0, "✓", curses.color_pair(2) | curses.A_BOLD)
                 self._line(stdscr, y, 1, line[1:], attr)
@@ -765,16 +760,17 @@ class App:
             prompt += f"[{mode_hint}] "
         if not self.direct_input:
             prompt += self.line
-        # The first pasted command remains editable in the bottom prompt.
-        # Display the others directly above the status; none executes on paste.
-        next_row = preview_start
+        # Paste previews follow the editable prompt; no command executes
+        # until the user confirms it with Enter.
+        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
+        next_row = prompt_y + 1
         for idx, command in enumerate(review[:visible_count], start=2):
             self._line(stdscr, next_row, 0, f"  {idx}. {command}", curses.color_pair(4))
             next_row += 1
         if remaining:
             self._line(stdscr, next_row, 0, f"  … ещё {remaining} команд", curses.color_pair(4))
             next_row += 1
-        if footer and status_y is not None:
+        if footer and next_row < h:
             mode = "session" if self.session is not None else "isolated"
             status = (self.paste_feedback or
                       f" {self.cfg.active} · {mode} · {self.ai_state if self.ai_on else 'AI off'}"
@@ -783,8 +779,7 @@ class App:
                 status = (f" скролл: колесо={self.scroll_wheel_events} "
                           f"стрелки={self.scroll_arrow_events} "
                           f"позиция={self.scroll}/{max_scroll} · Ctrl+P/N: история")
-            self._line(stdscr, status_y, 0, status, curses.color_pair(4))
-        self._line(stdscr, prompt_y, 0, prompt, curses.color_pair(1))
+            self._line(stdscr, next_row, 0, status, curses.color_pair(4))
         if not self.direct_input:
             cursor_x = min(w - 2, len(prompt))
             try:
