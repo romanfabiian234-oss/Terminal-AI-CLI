@@ -110,6 +110,98 @@ def matching_completions(line: str, choices: tuple[Completion, ...], limit: int 
     return matched[:limit]
 
 
+
+def _path_context(line: str) -> tuple[str, str] | None:
+    """Recognize the first path argument, not Python flags or script arguments."""
+    match = re.fullmatch(r"\s*(cd|(?:\S*/)?python(?:2|3)?(?:\.\d+)?)\s+(.*)", line)
+    if not match:
+        return None
+    command, argument = match.groups()
+    if argument.startswith("-") or (argument.endswith(" ") and argument.strip()):
+        return None
+    if " " in argument and "\\ " not in argument and not argument.startswith(("'", '"')):
+        return None
+    kind = "cd" if command == "cd" else "python"
+    return kind, argument
+
+
+def _available_home_dirs(home: Path) -> tuple[Completion, ...]:
+    """Offer real home folders directly, without asking the user to select '..'."""
+    names = ("Desktop", "Documents", "Downloads", "Applications", "Developer",
+             "Pictures", "Movies", "Music", "Public")
+    result = [Completion("Домой (~/)", "~/", "folder")]
+    for name in names:
+        if (home / name).is_dir():
+            result.append(Completion(f"{name} (~/)", f"~/{name}/", "folder"))
+    return tuple(result)
+
+
+def _path_entries(context: str, argument: str, cwd: Path, home: Path) -> tuple[Completion, ...]:
+    """Show contents of an explicitly selected folder without relying on a refresh trick."""
+    if not argument or argument.startswith("-"):
+        return ()
+    raw = argument.replace("\\ ", " ").strip("'\"")
+    if raw.startswith("~/") or raw == "~":
+        absolute = home / raw[2:] if raw.startswith("~/") else home
+    else:
+        value = Path(raw)
+        absolute = value if value.is_absolute() else cwd / value
+    if raw.endswith("/") or raw == "~":
+        directory, prefix, fragment = absolute, argument, ""
+    else:
+        directory, prefix, fragment = absolute.parent, argument.rsplit("/", 1)[0] + "/" if "/" in argument else "", absolute.name
+    try:
+        candidates = sorted(directory.iterdir(), key=lambda p: p.name.casefold())[:400]
+    except (OSError, ValueError):
+        return ()
+    result: list[Completion] = []
+    for path in candidates:
+        name = path.name
+        if not name.startswith(fragment) or not name or any(ord(ch) < 32 for ch in name):
+            continue
+        if name.startswith(".") and not fragment.startswith("."):
+            continue
+        try:
+            folder = path.is_dir()
+        except OSError:
+            continue
+        if not folder and (context != "python" or path.suffix.casefold() != ".py"):
+            continue
+        insertion = prefix + name + ("/" if folder else "")
+        result.append(Completion(name, insertion, "folder" if folder else "file"))
+        if len(result) >= 75:
+            break
+    if context == "python":
+        return tuple(x for x in result if x.kind == "file") + tuple(x for x in result if x.kind == "folder")
+    return tuple(result)
+
+
+def contextual_completions(line: str, cwd: Path, choices: tuple[Completion, ...],
+                           home: Path | None = None, limit: int = 75) -> tuple[Completion, ...]:
+    """Keep Inshellisense as the engine and add direct home/path navigation."""
+    context = _path_context(line)
+    if context is None:
+        return choices[:limit]
+    kind, argument = context
+    home = home or Path.home()
+    folders = _available_home_dirs(home) if not argument else ()
+    paths = _path_entries(kind, argument, cwd, home)
+    if not argument:
+        scripts = tuple(c for c in choices if kind == "python" and
+                        c.kind != "folder" and c.insert.casefold().endswith(".py"))
+        ordered = scripts + folders + choices
+    else:
+        ordered = paths + choices
+    seen: set[str] = set()
+    result: list[Completion] = []
+    for choice in ordered:
+        if choice.insert not in seen:
+            seen.add(choice.insert)
+            result.append(choice)
+        if len(result) >= limit:
+            break
+    return tuple(result)
+
 def replace_completion(line: str, choice: Completion) -> str:
     """Replace the unfinished final token, never press Enter for the user."""
     last_word = re.search(r"[^ \t]*$", line)
@@ -129,7 +221,8 @@ def _invoke(binary: str, line: str, cwd: Path) -> tuple[Completion, ...]:
         return ()
     if completed.returncode or len(completed.stdout) > 256_000:
         return ()
-    return matching_completions(line, parse_completions(completed.stdout, limit=75), limit=75)
+    matches = matching_completions(line, parse_completions(completed.stdout, limit=75), limit=75)
+    return contextual_completions(line, cwd, matches)
 
 
 class CompletionWorker:
