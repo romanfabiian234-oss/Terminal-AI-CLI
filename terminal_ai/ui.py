@@ -889,17 +889,23 @@ class App:
             return
         left = min(max(1, len(self.prompt()) + len(self.line) + 1), width - box_width - 1)
         blue = curses.color_pair(1)
-        self._line(stdscr, top, left, "╭" + "─" * (box_width - 2) + "╮", blue)
+        # Keep the selected item visible when moving beyond the five rows
+        # shown at once. These indices refer to the FULL suggestion list.
+        first = max(0, min(self.suggestion_index - n + 1, len(self.suggestions) - n))
+        counter = f" {self.suggestion_index + 1}/{len(self.suggestions)} " if len(self.suggestions) > n else ""
+        self._line(stdscr, top, left,
+                   "╭" + "─" * (box_width - 2 - len(counter)) + counter + "╮", blue)
         symbols = {"folder": "▱", "file": "▤", "option": "◇", "subcommand": "▸",
                    "shortcut": "↳", "arg": "·", "command": "›"}
-        for index, suggestion in enumerate(self.suggestions[:n]):
+        for row, suggestion in enumerate(self.suggestions[first:first + n]):
+            index = first + row
             symbol = symbols.get(suggestion.kind, "›")
             text = f" {symbol} {suggestion.name}"
             text = text[:box_width - 3].ljust(box_width - 2)
-            self._line(stdscr, top + index + 1, left, "│", blue)
-            self._line(stdscr, top + index + 1, left + 1, text,
+            self._line(stdscr, top + row + 1, left, "│", blue)
+            self._line(stdscr, top + row + 1, left + 1, text,
                        blue | curses.A_REVERSE if index == self.suggestion_index else blue)
-            self._line(stdscr, top + index + 1, left + box_width - 1, "│", blue)
+            self._line(stdscr, top + row + 1, left + box_width - 1, "│", blue)
         self._line(stdscr, top + box_height - 1, left,
                    "╰" + "─" * (box_width - 2) + "╯", blue)
 
