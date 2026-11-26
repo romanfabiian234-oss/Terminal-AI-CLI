@@ -43,6 +43,12 @@ class PasteTests(unittest.TestCase):
         self.assertIn("  2. whoami", visible)
         self.assertIn("  3. date", visible)
         self.assertIn("  4. ls", visible)
+        prompt_y = next(y for y, _, text, _ in screen.writes if text.startswith("MacBook-Air-Fabiian "))
+        self.assertEqual(prompt_y, screen.height - 1)
+        previews = [y for y, _, text, _ in screen.writes if text.startswith("  2.") or
+                    text.startswith("  3.") or text.startswith("  4.")]
+        self.assertEqual(previews, sorted(previews))
+        self.assertTrue(all(y < prompt_y - 1 for y in previews))
         self.assertFalse(app.blocks)
         self.assertFalse(app.pending)
 
