@@ -324,7 +324,8 @@ class App:
                 block.output.lines.popleft()
         block.finish(exit_code)
         block.analysis_epoch += 1  # Cancel pending incomplete explanations.
-        self._queue_ai(block)
+        if block.status != "interrupted":
+            self._queue_ai(block)
         self.active = None
         self.direct_input = False
 
@@ -696,6 +697,7 @@ class App:
             self.cursor = 0
             self.suggestions = ()
             if self.active:
+                self.active.cancel_requested = True
                 if self.session is not None:
                     try:
                         self.session.interrupt()
@@ -883,8 +885,9 @@ class App:
         # Keep the terminal empty on startup. Blocks appear only after commands.
         viewport: list[tuple[str, int, bool]] = []
         for index, block in enumerate(self.blocks):
-            heading = curses.color_pair(3 if block.status == "error" else 5) | curses.A_BOLD
-            symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
+            heading_color = 3 if block.status == "error" else 4 if block.status == "interrupted" else 5
+            heading = curses.color_pair(heading_color) | curses.A_BOLD
+            symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "–" if block.status == "interrupted" else "!"
             viewport.append((f"{symbol} {block.title}", heading, block.status == "ok"))
             viewport.extend(("  " + line, 0, False) for line in self._wrap(block.explanation, w - 3))
             if block.ai_model:
