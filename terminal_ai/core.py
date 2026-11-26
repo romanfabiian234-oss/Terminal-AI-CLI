@@ -406,6 +406,8 @@ class AiWorker:
             try:
                 chunks: list[str] = []
                 for chunk in iter_explanation(profile, command, output, code, language):
+                    if self.closed.is_set():
+                        return
                     chunks.append(chunk)
                     if len("".join(chunks)) > 600:
                         break
