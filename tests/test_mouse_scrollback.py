@@ -134,11 +134,77 @@ class MouseScrollTests(unittest.TestCase):
 
     @unittest.skipUnless(getattr(curses, "BUTTON5_PRESSED", None),
                          "Native BUTTON5 unavailable; use SGR fallback")
-    def test_wheel_registration_does_not_capture_clicks_or_drag(self):
+    def test_wheel_registration_captures_left_press_without_drag(self):
         with patch('terminal_ai.ui.curses.mouseinterval') as interval, patch('terminal_ai.ui.curses.mousemask') as mask:
             enable_mouse_wheel()
         interval.assert_called_once_with(0)
-        mask.assert_called_once_with(curses.BUTTON4_PRESSED | curses.BUTTON5_PRESSED)
+        mask.assert_called_once_with(curses.BUTTON4_PRESSED | curses.BUTTON5_PRESSED |
+                                     curses.BUTTON1_PRESSED)
+
+    def test_click_on_command_sets_caret_without_running_anything(self):
+        self.app.cwd = Path.home()
+        self.app.line = ""
+        for ch in "echo hello":
+            self.app.key(ch, 24, 100)
+        screen = FakeWindow(24, 100)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        prompt_start = len(self.app.prompt())
+        self.assertEqual(screen.cursor, (0, prompt_start + len(self.app.line)))
+        with patch("terminal_ai.ui.curses.getmouse",
+                   return_value=(0, prompt_start + 5, 0, 0, curses.BUTTON1_PRESSED)):
+            self.app.key(curses.KEY_MOUSE, 24, 100)
+        self.assertEqual(self.app.cursor, 5)
+        self.app.key("X", 24, 100)
+        self.assertEqual(self.app.line, "echo Xhello")
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        self.assertEqual(screen.cursor, (0, prompt_start + 6))
+        # Clicking on the hostname is not editing the input.
+        self.app.mouse_click(2, 0, 24, 100)
+        self.assertEqual(self.app.cursor, 6)
+        # Clicking to the right of the command moves to its end.
+        self.app.mouse_click(prompt_start + 30, 0, 24, 100)
+        self.assertEqual(self.app.cursor, len(self.app.line))
+        self.assertFalse(self.app.pending)
+        self.assertFalse(self.app.blocks)
+
+    def test_click_ignores_output_and_scrolled_away_prompt(self):
+        self.app.cwd = Path.home()
+        self.app.line = "echo test"
+        self.app.cursor = 4
+        self.app.last_cols = 90
+        block = self.app.add_block("seq 1 120", "Готово", "")
+        block.output.feed(("\\n".join(str(i) for i in range(1, 121)) + "\\n").encode())
+        block.finish(0)
+        screen = FakeWindow(18, 90)
+        self.app.last_rows = 18
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        # The prompt is visible at the bottom.
+        self.assertIsNotNone(self.app._prompt_click)
+        self.app.key(curses.KEY_PPAGE, 18, 90)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        self.assertIsNone(self.app._prompt_click)
+        self.app.mouse_click(35, 0, 18, 90)
+        self.assertEqual(self.app.cursor, 4)
+        self.assertEqual(self.app.line, "echo test")
+
+    def test_click_maps_to_visible_fragment_of_long_command(self):
+        self.app.cwd = Path.home()
+        self.app.line = ""
+        for ch in "echo " + "x" * 80:
+            self.app.key(ch, 24, 45)
+        screen = FakeWindow(24, 45)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            self.app.render(screen)
+        self.assertIsNotNone(self.app._prompt_click)
+        row, prefix_x, first_char, width = self.app._prompt_click
+        self.assertGreater(first_char, 0)
+        self.app.mouse_click(prefix_x + 2, row, 24, width)
+        self.assertEqual(self.app.cursor, first_char + 2)
+        self.assertEqual(len(self.app.line), 85)
 
     def test_private_screen_does_not_erase_main_scrollback(self):
         with patch('terminal_ai.ui.os.isatty', return_value=True), patch('terminal_ai.ui.os.write') as write:
