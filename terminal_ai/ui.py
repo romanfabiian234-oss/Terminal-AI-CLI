@@ -1134,6 +1134,15 @@ def run_ui(config: Config) -> None:
         curses.curs_set(1)
         stdscr.keypad(True)
         stdscr.timeout(20)
+        interrupt_pending = False
+
+        def queue_interrupt(_signum: int, _frame: object) -> None:
+            nonlocal interrupt_pending
+            interrupt_pending = True
+
+        # cbreak can turn Ctrl+C into SIGINT instead of a \x03 key event.
+        # Record the signal and cancel from the main loop, not a signal handler.
+        previous_sigint = signal.signal(signal.SIGINT, queue_interrupt)
         needs_redraw = True
         last_render_at = 0.0
         last_resync_at = time.monotonic()
@@ -1142,6 +1151,10 @@ def run_ui(config: Config) -> None:
                 h, w = stdscr.getmaxyx()
                 needs_redraw = (read_input_event(stdscr, app, h, w, raw_sgr, wheel_decoder)
                                 or needs_redraw)
+                if interrupt_pending:
+                    interrupt_pending = False
+                    app.key("\x03", h, w)
+                    needs_redraw = True
                 needs_redraw = app.poll() or needs_redraw
                 if getattr(app, "raw_command", ""):
                     command = app.raw_command
@@ -1198,8 +1211,11 @@ def run_ui(config: Config) -> None:
                         last_resync_at = now
                     needs_redraw = False
         finally:
-            configure_mouse(False)
-            set_bracketed_paste(False)
-            app.stop()
+            try:
+                configure_mouse(False)
+                set_bracketed_paste(False)
+                app.stop()
+            finally:
+                signal.signal(signal.SIGINT, previous_sigint)
 
     curses.wrapper(main)
