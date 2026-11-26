@@ -114,7 +114,10 @@ class CompletionBridgeTests(unittest.TestCase):
                 worker.request("python3 ", Path("/tmp"))
                 worker._future.result(timeout=3)
                 result = worker.collect("python3 ", Path("/tmp"))
-                self.assertEqual([x.name for x in result], ["run.py", "src"])
+                names = [x.name for x in result]
+                self.assertEqual(names[0], "run.py")
+                self.assertIn("src", names)
+                self.assertIn("Домой (~/)", names)
             finally:
                 worker.close()
 
@@ -202,13 +205,13 @@ class CompletionBridgeTests(unittest.TestCase):
             {"name": f"folder_{n:02}", "insertValue": f"folder_{n:02}/",
              "type": "folder"} for n in range(23)
         ]})
-        fake = subprocess.CompletedProcess(["is", "complete", "cd "], 0, payload, "")
+        fake = subprocess.CompletedProcess(["is", "complete", "git "], 0, payload, "")
         with patch("terminal_ai.completion.subprocess.run", return_value=fake):
             worker = CompletionWorker(binary="/opt/homebrew/bin/is")
             try:
-                worker.request("cd ", Path("/tmp"))
+                worker.request("git ", Path("/tmp"))
                 worker._future.result(timeout=3)
-                result = worker.collect("cd ", Path("/tmp"))
+                result = worker.collect("git ", Path("/tmp"))
                 self.assertEqual(len(result), 23)
                 self.assertEqual(result[-1].name, "folder_22")
             finally:
