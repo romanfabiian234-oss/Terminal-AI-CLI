@@ -129,10 +129,10 @@ def _available_home_dirs(home: Path) -> tuple[Completion, ...]:
     """Offer real home folders directly, without asking the user to select '..'."""
     names = ("Desktop", "Documents", "Downloads", "Applications", "Developer",
              "Pictures", "Movies", "Music", "Public")
-    result = [Completion("Домой (~/)", "~/", "folder")]
+    result = [Completion("Домой", "~/", "folder")]
     for name in names:
         if (home / name).is_dir():
-            result.append(Completion(f"{name} (~/)", f"~/{name}/", "folder"))
+            result.append(Completion(name, f"~/{name}/", "folder"))
     return tuple(result)
 
 
