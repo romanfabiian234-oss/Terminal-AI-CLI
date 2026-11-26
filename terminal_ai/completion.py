@@ -167,7 +167,9 @@ def _path_entries(context: str, argument: str, cwd: Path, home: Path) -> tuple[C
             continue
         if not folder and (context != "python" or path.suffix.casefold() != ".py"):
             continue
-        insertion = prefix + name + ("/" if folder else "")
+        # Escape spaces and shell metacharacters without quoting the leading ~.
+        escaped = "".join(ch if ch.isalnum() or ch in "._-" else "\\" + ch for ch in name)
+        insertion = prefix + escaped + ("/" if folder else "")
         result.append(Completion(name, insertion, "folder" if folder else "file"))
         if len(result) >= 75:
             break
@@ -190,6 +192,10 @@ def contextual_completions(line: str, cwd: Path, choices: tuple[Completion, ...]
         scripts = tuple(c for c in choices if kind == "python" and
                         c.kind != "folder" and c.insert.casefold().endswith(".py"))
         ordered = scripts + folders + choices
+    elif "/" in argument or argument.startswith("~"):
+        # For a selected parent/home path, only offer entries from that path,
+        # not unrelated suggestions from the original working directory.
+        ordered = paths
     else:
         ordered = paths + choices
     seen: set[str] = set()
@@ -204,10 +210,15 @@ def contextual_completions(line: str, cwd: Path, choices: tuple[Completion, ...]
 
 def replace_completion(line: str, choice: Completion) -> str:
     """Replace the unfinished final token, never press Enter for the user."""
-    last_word = re.search(r"[^ \t]*$", line)
-    if last_word is None or not choice.insert:
+    if not choice.insert:
         return line
-    return line[:last_word.start()] + choice.insert
+    if choice.kind in ("folder", "file"):
+        context = _path_context(line)
+        if context is not None:
+            _, argument = context
+            return line[:len(line) - len(argument)] + choice.insert if argument else line + choice.insert
+    last_word = re.search(r"[^ \t]*$", line)
+    return line[:last_word.start()] + choice.insert if last_word else line
 
 
 def _invoke(binary: str, line: str, cwd: Path) -> tuple[Completion, ...]:
@@ -218,9 +229,9 @@ def _invoke(binary: str, line: str, cwd: Path) -> tuple[Completion, ...]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return ()
+        return contextual_completions(line, cwd, ())
     if completed.returncode or len(completed.stdout) > 256_000:
-        return ()
+        return contextual_completions(line, cwd, ())
     matches = matching_completions(line, parse_completions(completed.stdout, limit=75), limit=75)
     return contextual_completions(line, cwd, matches)
 
