@@ -28,7 +28,7 @@ class SmoothScrollTests(unittest.TestCase):
         for _ in range(300):
             self.app.scroll_wheel("up", 60)
         self.assertEqual(self.app.scroll_target, 300)
-        for frame in range(1, 51):
+        for frame in range(1, 61):
             before = self.app.scroll
             self.app.advance_scroll(100, now=frame * 0.025)
             self.assertLessEqual(self.app.scroll - before, 2)
