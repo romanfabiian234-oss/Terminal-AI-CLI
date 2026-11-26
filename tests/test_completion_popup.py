@@ -2,13 +2,14 @@
 import curses
 import json
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from terminal_ai.completion import (
-    Completion, CompletionWorker, matching_completions, parse_completions,
-    replace_completion, safe_to_complete,
+    Completion, CompletionWorker, contextual_completions, matching_completions,
+    parse_completions, replace_completion, safe_to_complete,
 )
 from terminal_ai.core import load_config
 from terminal_ai.ui import App
@@ -116,6 +117,68 @@ class CompletionBridgeTests(unittest.TestCase):
                 self.assertEqual([x.name for x in result], ["run.py", "src"])
             finally:
                 worker.close()
+
+    def test_home_shortcut_available_without_parent_navigation(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            cwd = Path(root) / "workspace"
+            home.mkdir()
+            cwd.mkdir()
+            (home / "Documents").mkdir()
+            (home / "Downloads").mkdir()
+            (cwd / "reports").mkdir()
+            from_engine = (Completion("reports", "reports/", "folder"),)
+            for command in ("cd ", "python3 "):
+                with self.subTest(command=command):
+                    results = contextual_completions(command, cwd, from_engine, home)
+                    inserts = [r.insert for r in results]
+                    self.assertEqual(inserts[0], "~/")
+                    self.assertIn("~/Documents/", inserts)
+                    self.assertIn("~/Downloads/", inserts)
+                    self.assertIn("reports/", inserts)
+
+    def test_home_and_parent_completions_do_not_leak_current_directory(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            cwd = home / "project"
+            cwd.mkdir(parents=True)
+            (home / "Downloads").mkdir()
+            (home / "script.py").write_text("print(42)")
+            (cwd / "local_only").mkdir()
+            unrelated = (Completion("local_only", "local_only/", "folder"),)
+            folders = contextual_completions("cd ~/", cwd, unrelated, home)
+            self.assertIn("~/Downloads/", [r.insert for r in folders])
+            self.assertNotIn("local_only/", [r.insert for r in folders])
+            parent = contextual_completions("python3 ../", cwd, unrelated, home)
+            self.assertEqual(parent[0].insert, "../script.py")
+            self.assertIn("../Downloads/", [r.insert for r in parent])
+            self.assertNotIn("local_only/", [r.insert for r in parent])
+
+    def test_subfolders_support_spaces_without_extra_keystrokes(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root) / "home"
+            nested = home / "Chroma Shader V1.0.6"
+            nested.mkdir(parents=True)
+            (nested / "images").mkdir()
+            line = "cd ~/"
+            root_choices = contextual_completions(line, home, (), home)
+            chosen = next(c for c in root_choices if c.name == "Chroma Shader V1.0.6")
+            self.assertEqual(chosen.insert, r"~/Chroma\ Shader\ V1.0.6/")
+            nested_line = replace_completion(line, chosen)
+            self.assertEqual(nested_line, r"cd ~/Chroma\ Shader\ V1.0.6/")
+            sub = contextual_completions(nested_line, home, (), home)
+            self.assertEqual(sub[0].insert, r"~/Chroma\ Shader\ V1.0.6/images/")
+            self.assertEqual(replace_completion(nested_line, sub[0]),
+                             r"cd ~/Chroma\ Shader\ V1.0.6/images/")
+
+    def test_shortcuts_are_real_directories_only(self):
+        with tempfile.TemporaryDirectory() as root:
+            home = Path(root)
+            (home / "Desktop").mkdir()
+            (home / "Documents").write_text("not a folder")
+            inserts = [r.insert for r in contextual_completions("cd ", home, (), home)]
+            self.assertIn("~/Desktop/", inserts)
+            self.assertNotIn("~/Documents/", inserts)
 
     def test_backend_keeps_many_results_for_popup_scrolling(self):
         payload = json.dumps({"suggestions": [
@@ -289,6 +352,27 @@ class CompletionPopupTests(unittest.TestCase):
         self.assertTrue(any("folder_16" in text for _, _, text, _ in screen.writes))
         self.assertTrue(all(0 <= row < 9 for row, _, _, _ in screen.writes))
         self.assertTrue(all(0 <= column < 50 for _, column, _, _ in screen.writes))
+
+    def test_tab_on_folder_reopens_children_without_space_backspace(self):
+        self.app.line = "cd "
+        self.app.suggestions = (
+            Completion("Домой (~/)", "~/", "folder"),
+            Completion("Documents", "~/Documents/", "folder"),
+        )
+        with patch.object(self.app, "start") as start:
+            self.app.key("\t", 24, 100)
+            self.assertEqual(self.app.line, "cd ~/")
+            self.assertEqual(self.app.suggestions, ())
+            self.assertEqual(self.app._completion_input, "")
+            self.assertFalse(self.app._completion_suppressed)
+            start.assert_not_called()
+
+    def test_tab_on_file_keeps_popup_closed(self):
+        self.app.line = "python3 "
+        self.app.suggestions = (Completion("runner.py", "runner.py", "file"),)
+        self.app.key("\t", 24, 100)
+        self.assertEqual(self.app.line, "python3 runner.py")
+        self.assertTrue(self.app._completion_suppressed)
 
     def test_popup_does_not_obscure_prompt_when_short_window(self):
         self.app.line = "git "
