@@ -54,7 +54,7 @@ class ShellSemantics(unittest.TestCase):
 
     def test_quoted_metacharacters_are_just_directory_names(self):
         with tempfile.TemporaryDirectory() as root:
-            base = Path(root)
+            base = Path(root).resolve()  # macOS: /var aliases /private/var.
             folder = base / "A; B && C"
             folder.mkdir()
             self.app.cwd = base
@@ -64,7 +64,7 @@ class ShellSemantics(unittest.TestCase):
 
     def test_cd_dash_toggles_previous_directory(self):
         with tempfile.TemporaryDirectory() as root:
-            base = Path(root)
+            base = Path(root).resolve()  # macOS: /var aliases /private/var.
             folder = base / "child"
             folder.mkdir()
             self.app.cwd = base
