@@ -68,6 +68,26 @@ def parse_completions(payload: str, limit: int = 7) -> tuple[Completion, ...]:
     return tuple(result)
 
 
+def matching_completions(line: str, choices: tuple[Completion, ...], limit: int = 7) -> tuple[Completion, ...]:
+    """Avoid suggesting unrelated paths while the executable name is unfinished.
+
+    Inshellisense may provide positional arguments even before the user has
+    typed a space. Never replace "python3" with "reports" or another folder.
+    """
+    if not line or line[-1].isspace():
+        return choices[:limit]
+    partial = line.split()[-1].lstrip("'\\\"")
+    # Match a basename for paths like "cd ~/Doc", but the full insertion
+    # may also be an absolute or relative path.
+    basename = partial.rsplit("/", 1)[-1].casefold()
+    if not basename:
+        return choices[:limit]
+    return tuple(choice for choice in choices
+                 if choice.name.casefold().startswith(basename)
+                 or choice.insert.casefold().startswith(partial.casefold())
+                 or choice.insert.rsplit("/", 1)[-1].casefold().startswith(basename))[:limit]
+
+
 def replace_completion(line: str, choice: Completion) -> str:
     """Replace the unfinished final token, never press Enter for the user."""
     last_word = re.search(r"[^ \t]*$", line)
@@ -87,7 +107,7 @@ def _invoke(binary: str, line: str, cwd: Path) -> tuple[Completion, ...]:
         return ()
     if completed.returncode or len(completed.stdout) > 256_000:
         return ()
-    return parse_completions(completed.stdout)
+    return matching_completions(line, parse_completions(completed.stdout, limit=75))
 
 
 class CompletionWorker:
