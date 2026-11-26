@@ -23,6 +23,7 @@ class FakeWindow:
 
     def erase(self):
         self.writes.clear()
+        self.cursor = None
 
     def addnstr(self, y, x, text, limit, attr):
         self.writes.append((y, x, text[:limit], attr))
@@ -76,7 +77,7 @@ class ShellAppearance(unittest.TestCase):
                             for y, _, s, _ in texts))
 
 
-    def test_prompt_follows_history_and_only_reaches_bottom_when_full(self):
+    def test_prompt_scrolls_out_of_view_when_browsing_earlier_output(self):
         b = self.app.add_block('seq 1 90', 'Готово', '')
         b.output.feed(('\n'.join(map(str, range(1, 91))) + '\n').encode())
         b.finish(0)
@@ -84,9 +85,9 @@ class ShellAppearance(unittest.TestCase):
             screen = FakeWindow(height, 90)
             self.app.key(curses.KEY_PPAGE, height, 90)
             self.render(screen)
-            self.assertEqual(screen.cursor[0], height - 2)
-            self.assertTrue(any(y == height - 2 and 'MacBook-Air-Fabiian' in text
-                                for y, _, text, _ in screen.writes))
+            self.assertIsNone(screen.cursor)
+            self.assertFalse(any('MacBook-Air-Fabiian' in text
+                                 for _, _, text, _ in screen.writes))
             self.assertTrue(all(0 <= y < height for y, _, _, _ in screen.writes))
 
     def test_prompt_moves_down_with_each_short_command_without_empty_gap(self):
@@ -174,7 +175,50 @@ class ShellAppearance(unittest.TestCase):
         top_view = '\n'.join(text for _, _, text, _ in screen.writes)
         self.assertNotEqual(top_view, bottom_view)
         self.assertTrue(any(text.strip() == '1' for _, _, text, _ in screen.writes))
+        self.assertFalse(any('MacBook-Air-Fabiian' in text
+                             for _, _, text, _ in screen.writes))
+        self.assertIsNone(screen.cursor)
+
+    def test_typing_while_scrolled_up_returns_to_live_prompt(self):
+        screen = FakeWindow(24, 90)
+        b = self.app.add_block('seq 1 150', 'Готово', '')
+        b.output.feed(('\n'.join(map(str, range(1, 151))) + '\n').encode())
+        b.finish(0)
+        for _ in range(20):
+            self.app.key(curses.KEY_PPAGE, 24, 90)
+        self.render(screen)
+        self.assertFalse(any('MacBook-Air-Fabiian' in text
+                             for _, _, text, _ in screen.writes))
+        self.app.key('x', 24, 90)
+        self.render(screen)
+        self.assertEqual(self.app.scroll, 0)
+        self.assertEqual(self.app.line, 'x')
         self.assertIsNotNone(screen.cursor)
+        self.assertTrue(any('MacBook-Air-Fabiian' in text and text.endswith('% x')
+                            for _, _, text, _ in screen.writes))
+
+    def test_long_output_prompt_only_follows_final_line(self):
+        screen = FakeWindow(24, 90)
+        b = self.app.add_block('seq 1 150', 'Готово', '')
+        b.output.feed(('\n'.join(map(str, range(1, 151))) + '\n').encode())
+        b.finish(0)
+        self.render(screen)
+        prompt_y = next(y for y, _, text, _ in screen.writes if
+                        text.startswith('MacBook-Air-Fabiian '))
+        self.assertTrue(any(y == prompt_y - 1 and text.strip() == '150'
+                            for y, _, text, _ in screen.writes))
+        for _ in range(20):
+            self.app.key(curses.KEY_PPAGE, 24, 90)
+        self.render(screen)
+        self.assertTrue(any(text.strip() == '1' for _, _, text, _ in screen.writes))
+        self.assertFalse(any('MacBook-Air-Fabiian' in text
+                             for _, _, text, _ in screen.writes))
+        for _ in range(20):
+            self.app.key(curses.KEY_NPAGE, 24, 90)
+        self.render(screen)
+        self.assertTrue(any(text.strip() == '150' for _, _, text, _ in screen.writes))
+        self.assertTrue(any('MacBook-Air-Fabiian' in text
+                             for _, _, text, _ in screen.writes))
 
     def test_ctrl_t_now_collapses_and_reopens_output(self):
         b = self.app.add_block('seq 1 150', 'Команда завершилась', 'Выведены числа от 1 до 150')
