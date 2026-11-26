@@ -514,10 +514,11 @@ class App:
         # Insert at the caret, not necessarily at the end. Each pasted
         # newline remains a separate command requiring explicit Enter.
         caret = min(self.cursor, len(self.line))
+        suffix = self.line[caret:]
         try:
             commands = prepare_pasted_commands(text, self.line[:caret])
             if commands:
-                commands[-1] += self.line[caret:]
+                commands[-1] += suffix
                 if len(commands[-1]) > 4096:
                     raise ValueError("Одна из команд слишком длинная (максимум 4096 символов).")
         except ValueError as exc:
@@ -526,7 +527,7 @@ class App:
         if not commands:
             return
         self.line = commands[0]
-        self.cursor = len(commands[0]) - (len(self.line[caret:]) if len(commands) == 1 else 0)
+        self.cursor = len(commands[0]) - (len(suffix) if len(commands) == 1 else 0)
         self.scroll = 0
         self.scroll_target = None
         self.paste_review.extend(commands[1:])
