@@ -97,6 +97,31 @@ class PasteTests(unittest.TestCase):
             self.app.key("\n", 24, 90)
             start.assert_called_once()
 
+    def test_paste_at_caret_preserves_suffix_and_requires_enter(self):
+        with patch.object(self.app, "start") as start:
+            for key in "echo AB":
+                self.app.key(key, 24, 90)
+            self.app.key(curses.KEY_LEFT, 24, 90)
+            for key in "\x1b[200~X\x1b[201~":
+                self.app.key(key, 24, 90)
+            self.assertEqual(self.app.line, "echo AXB")
+            self.assertEqual(self.app.cursor, len("echo AX"))
+            start.assert_not_called()
+            self.app.key("\n", 24, 90)
+            start.assert_called_once_with("echo AXB", 24, 90)
+
+    def test_multiline_paste_at_caret_never_auto_executes(self):
+        with patch.object(self.app, "start") as start:
+            for key in "echo AB":
+                self.app.key(key, 24, 90)
+            self.app.key(curses.KEY_LEFT, 24, 90)
+            for key in "\x1b[200~X\nwhoami\x1b[201~":
+                self.app.key(key, 24, 90)
+            self.assertEqual(self.app.line, "echo AX")
+            self.assertEqual(self.app.cursor, len(self.app.line))
+            self.assertEqual(list(self.app.paste_review), ["whoamiB"])
+            start.assert_not_called()
+
     def test_cancel_prevents_unconfirmed_execution(self):
         with patch.object(self.app, "start") as start:
             for key in "\x1b[200~echo FIRST\necho SECOND\x1b[201~":
