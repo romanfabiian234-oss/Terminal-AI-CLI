@@ -145,7 +145,11 @@ def simple_cd_target(command: str) -> str | None:
         return None
     target = args[0] if args else "~"
     # Shell operators/expansions can have side effects and need shell semantics.
-    if any(pattern in target for pattern in ("`", "$(", "*", "?", "[", "]")):
+    if (not target or any(pattern in target for pattern in
+                          ("`", "$", "*", "?", "[", "]"))):
+        return None
+    # Quoted or escaped '~' is a literal filename, not home expansion.
+    if "'~" in command or '"~' in command or "\\~" in command:
         return None
     if target.startswith("-") and target != "-":
         return None
