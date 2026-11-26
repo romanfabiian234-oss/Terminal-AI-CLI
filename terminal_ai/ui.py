@@ -47,16 +47,18 @@ def configure_colors(background: int) -> None:
 
 
 def enable_mouse_wheel() -> None:
-    """Request wheel events without capturing clicks or dragging when supported.
+    """Request wheel and left-click events; do not track motion or dragging.
 
     macOS Terminal may instead navigate its own scrollback; its profile's
     `Scroll alternate screen` setting controls that native behavior.
     """
     try:
         curses.mouseinterval(0)
-        wheel = getattr(curses, "BUTTON4_PRESSED", 0) | getattr(curses, "BUTTON5_PRESSED", 0)
-        if wheel:
-            curses.mousemask(wheel)
+        mouse_events = (getattr(curses, "BUTTON4_PRESSED", 0) |
+                        getattr(curses, "BUTTON5_PRESSED", 0) |
+                        getattr(curses, "BUTTON1_PRESSED", 0))
+        if mouse_events:
+            curses.mousemask(mouse_events)
     except (curses.error, AttributeError):
         pass
 
@@ -201,6 +203,8 @@ class App:
         self.scroll_direction = ""
         self.scroll_last_step = 0.0
         self._cursor_visible: bool | None = None
+        # Last rendered prompt: row, input start column, first visible character, width.
+        self._prompt_click: tuple[int, int, int, int] | None = None
         self.completion = CompletionWorker()
         self.suggestions: tuple[Completion, ...] = ()
         self.suggestion_index = 0
@@ -447,6 +451,7 @@ class App:
 
     def resize(self, rows: int, cols: int) -> None:
         self.last_rows, self.last_cols = rows, cols
+        self._prompt_click = None
         if self.session is not None:
             self.session.resize(rows - 3, cols)
         if self.master is not None:
@@ -549,6 +554,20 @@ class App:
             self._queue_scroll(direction)
             self.scroll_wheel_events += 1
 
+    def mouse_click(self, x: int, y: int, rows: int, cols: int) -> None:
+        """Move the input caret on a left click; never execute text or commands."""
+        hit = self._prompt_click
+        if self.direct_input or hit is None:
+            return
+        prompt_y, input_x, first_char, width = hit
+        if (rows != self.last_rows or cols != width or
+                y != prompt_y or not input_x <= x < width - 1):
+            return
+        self.cursor = min(len(self.line), first_char + x - input_x)
+        self.suggestions = ()
+        self._completion_input = ""
+        self.scroll_target = None
+
     def advance_scroll(self, max_scroll: int, now: float | None = None) -> None:
         self.scroll = min(max_scroll, max(0, self.scroll))
         if self.scroll_target is None:
@@ -580,11 +599,13 @@ class App:
         self.last_rows, self.last_cols = rows, cols
         if key == curses.KEY_MOUSE:
             try:
-                _, _, _, _, buttons = curses.getmouse()
+                _, x, y, _, buttons = curses.getmouse()
                 if buttons & getattr(curses, "BUTTON4_PRESSED", 0):
                     self.scroll_wheel("up", rows)
                 elif buttons & getattr(curses, "BUTTON5_PRESSED", 0):
                     self.scroll_wheel("down", rows)
+                elif buttons & getattr(curses, "BUTTON1_PRESSED", 0):
+                    self.mouse_click(x, y, rows, cols)
             except curses.error:
                 pass
             return
@@ -806,6 +827,7 @@ class App:
     def render(self, stdscr: curses.window, force_redraw: bool = False) -> None:
         h, w = stdscr.getmaxyx()
         if h < 7 or w < 25:
+            self._prompt_click = None
             stdscr.erase()
             self._line(stdscr, 0, 0, "Увеличь окно терминала", 0)
             if force_redraw:
@@ -918,6 +940,8 @@ class App:
             self._draw_suggestions(stdscr, prompt_y, h, w)
         # Only display the editing cursor when its prompt is in view.
         prompt_visible = 0 <= prompt_y < h
+        self._prompt_click = ((prompt_y, len(prefix), first_char, w)
+                              if prompt_visible and not self.direct_input else None)
         if not self.direct_input:
             if self._cursor_visible is not prompt_visible:
                 try:
@@ -1047,6 +1071,9 @@ def run_ui(config: Config) -> None:
                         for kind, value in wheel_decoder.feed(key):
                             if kind == "wheel":
                                 app.scroll_wheel(str(value), h)
+                            elif kind == "click":
+                                x, y = value
+                                app.mouse_click(x, y, h, w)
                             else:
                                 app.key(value, h, w)
                     else:
