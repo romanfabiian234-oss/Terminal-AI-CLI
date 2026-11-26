@@ -39,6 +39,28 @@ class OldMacSGRWheelTests(unittest.TestCase):
         self.assertEqual(self.feed("\x1b[<4;10;4M"), [])  # Modified press.
         self.assertEqual(self.feed("\x1b[<0;0;4M"), [])  # Invalid coordinates.
 
+    def test_sgr_left_press_repositions_real_prompt_caret(self):
+        from test_appearance import FakeWindow
+        app = App(load_config(Path("/tmp/terminal-ai-missing-sgr-click")))
+        app.hostname = "MacBook-Air-Fabiian"
+        app.cwd = Path.home()
+        for key in "echo hello":
+            app.key(key, 24, 90)
+        screen = FakeWindow(24, 90)
+        with patch("terminal_ai.ui.curses.color_pair", return_value=0):
+            app.render(screen)
+        x = len(app.prompt()) + 5
+        events = self.feed(f"\\x1b[<0;{x + 1};1M")
+        self.assertEqual(events, [("click", (x, 0))])
+        for kind, point in events:
+            if kind == "click":
+                app.mouse_click(*point, 24, 90)
+        self.assertEqual(app.cursor, 5)
+        app.key("X", 24, 90)
+        self.assertEqual(app.line, "echo Xhello")
+        self.assertFalse(app.pending)
+        app.stop()
+
     def test_untrusted_malformed_mouse_event_dropped(self):
         self.assertEqual(self.feed("\x1b[<65;1;xM"), [])
         self.assertEqual(self.feed("\x1b[<65;1;2" + "9" * 80 + "M"), [])
