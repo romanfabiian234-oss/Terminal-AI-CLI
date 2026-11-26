@@ -175,7 +175,7 @@ class MouseScrollTests(unittest.TestCase):
         self.app.cursor = 4
         self.app.last_cols = 90
         block = self.app.add_block("seq 1 120", "Готово", "")
-        block.output.feed(("\\n".join(str(i) for i in range(1, 121)) + "\\n").encode())
+        block.output.feed(("\n".join(str(i) for i in range(1, 121)) + "\n").encode())
         block.finish(0)
         screen = FakeWindow(18, 90)
         self.app.last_rows = 18
