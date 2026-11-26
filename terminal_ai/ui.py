@@ -695,7 +695,7 @@ class App:
         stdscr.erase()
         # Keep the terminal empty on startup. Blocks appear only after commands.
         viewport: list[tuple[str, int, bool]] = []
-        for block in self.blocks:
+        for index, block in enumerate(self.blocks):
             heading = curses.color_pair(3 if block.status == "error" else 5) | curses.A_BOLD
             symbol = "●" if block.status == "running" else "✓" if block.status == "ok" else "!"
             viewport.append((f"{symbol} {block.title}", heading, block.status == "ok"))
@@ -725,7 +725,10 @@ class App:
             if not block.expanded and len(output) > len(selected):
                 viewport.append((f"    +{len(output) - len(selected)} строк (Ctrl+T — развернуть)",
                                  curses.color_pair(4), False))
-            viewport.append(("", 0, False))
+            # Space between command blocks, but not between the latest
+            # command's output and the live shell prompt.
+            if index < len(self.blocks) - 1:
+                viewport.append(("", 0, False))
 
         # Show every queued pasted command below the editable prompt when room
         # permits. Reserve vertical space rather than obscuring the history or
