@@ -188,6 +188,7 @@ class App:
         self.next_id = 1
         self.line = ""
         self.cursor = 0  # Character offset in the editable command line.
+        self.input_offset = 0  # Left edge of the visible input for long commands.
         self.pending: deque[str] = deque()
         self.paste_decoder = PasteDecoder()
         self.paste_review: deque[str] = deque()
@@ -872,7 +873,12 @@ class App:
         if len(prefix) >= available:
             prefix = prefix[-(available - 1):] if available > 1 else ""
         space = max(1, available - len(prefix))
-        first_char = max(0, caret - space + 1)
+        first_char = min(self.input_offset, max(0, len(self.line) - space + 1))
+        if caret < first_char:
+            first_char = caret
+        elif caret >= first_char + space:
+            first_char = caret - space + 1
+        self.input_offset = first_char
         visible_line = self.line[first_char:first_char + space]
         prompt = prefix + (visible_line if not self.direct_input else "")
         cursor_x = min(w - 2, len(prefix) + caret - first_char)
