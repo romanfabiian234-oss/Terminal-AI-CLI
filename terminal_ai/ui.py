@@ -93,9 +93,14 @@ def set_bracketed_paste(enabled: bool) -> None:
         os.write(sys.stdout.fileno(), b"\x1b[?2004h" if enabled else b"\x1b[?2004l")
 
 
-def wheel_scroll_step(rows: int) -> int:
-    """Move faster in larger terminals without jumping entire pages."""
-    return max(5, min(12, rows // 6))
+def smooth_scroll_step(current: int, target: int, last_at: float,
+                       now: float) -> tuple[int, float]:
+    """Advance at most two text rows every 20 ms; no pixel scrolling."""
+    delta = target - current
+    if delta == 0 or now - last_at < 0.02:
+        return current, last_at
+    step = min(abs(delta), 1 if abs(delta) < 6 else 2)
+    return current + (step if delta > 0 else -step), now
 
 
 SLASH_COMMANDS = frozenset({"help", "quit", "exit", "session", "models", "model",
@@ -189,6 +194,9 @@ class App:
         self.history: list[str] = []
         self.hist_pos = 0
         self.scroll = 0
+        self.scroll_target: int | None = None
+        self.scroll_direction = ""
+        self.scroll_last_step = 0.0
         # Terminal.app may report alternate-screen wheel gestures as arrows.
         self.scroll_wheel_events = 0
         self.scroll_arrow_events = 0
@@ -210,6 +218,7 @@ class App:
         b.title, b.explanation, b.status = title, message, status
         self.blocks.append(b)
         self.scroll = 0
+        self.scroll_target = None
         return b
 
     def start(self, command: str, rows: int, cols: int) -> None:
@@ -219,6 +228,7 @@ class App:
         self.blocks.append(b)
         self.active = b
         self.scroll = 0
+        self.scroll_target = None
         if self.session is not None:
             try:
                 self.session.send(command)
@@ -455,15 +465,36 @@ class App:
         self.paste_review.extend(commands[1:])
         self.paste_feedback = f"Вставлено {len(commands)} команд: Enter — выполнить одну; Ctrl+C — отменить."
 
-    def scroll_wheel(self, direction: str, rows: int) -> None:
-        step = wheel_scroll_step(rows)
-        if direction == "up":
-            self.scroll += step
-        elif direction == "down":
-            self.scroll = max(0, self.scroll - step)
-        else:
+    def _queue_scroll(self, direction: str) -> None:
+        """Change the desired position, not the currently visible row."""
+        if direction not in ("up", "down"):
             return
-        self.scroll_wheel_events += 1
+        # Reverse immediately instead of draining a stale gesture backlog.
+        base = (self.scroll if self.scroll_target is None or
+                direction != self.scroll_direction else self.scroll_target)
+        self.scroll_target = max(0, base + (1 if direction == "up" else -1))
+        self.scroll_direction = direction
+
+    def scroll_wheel(self, direction: str, rows: int) -> None:
+        if direction in ("up", "down"):
+            self._queue_scroll(direction)
+            self.scroll_wheel_events += 1
+
+    def advance_scroll(self, max_scroll: int, now: float | None = None) -> None:
+        self.scroll = min(max_scroll, max(0, self.scroll))
+        if self.scroll_target is None:
+            return
+        self.scroll_target = min(max_scroll, max(0, self.scroll_target))
+        self.scroll, self.scroll_last_step = smooth_scroll_step(
+            self.scroll, self.scroll_target, self.scroll_last_step,
+            time.monotonic() if now is None else now,
+        )
+        if self.scroll == self.scroll_target:
+            self.scroll_target = None
+
+    @property
+    def is_scrolling(self) -> bool:
+        return self.scroll_target is not None
 
     def key(self, key: str | int, rows: int, cols: int) -> None:
         # Bracketed paste is not a sequence of Enter keypresses. Never execute
@@ -492,9 +523,11 @@ class App:
             self.resize(rows, cols)
             return
         if key == curses.KEY_PPAGE:
+            self.scroll_target = None
             self.scroll += max(1, rows // 2)
             return
         if key == curses.KEY_NPAGE:
+            self.scroll_target = None
             self.scroll = max(0, self.scroll - max(1, rows // 2))
             return
         if key == "\x14":  # Ctrl+T
@@ -505,6 +538,7 @@ class App:
             if self.active is None:
                 self.blocks.clear()
                 self.scroll = 0
+                self.scroll_target = None
             return
         if key == "\x03":  # Ctrl+C: stop current process and cancel pending commands.
             self.pending.clear()
@@ -559,11 +593,7 @@ class App:
             # Apple Terminal's "Scroll alternate screen" can turn the trackpad
             # into repeated arrow keys rather than KEY_MOUSE. While the prompt
             # is empty, arrows navigate the output; Ctrl+P/N access history.
-            step = wheel_scroll_step(rows)
-            if key == curses.KEY_UP:
-                self.scroll += step
-            else:
-                self.scroll = max(0, self.scroll - step)
+            self._queue_scroll("up" if key == curses.KEY_UP else "down")
             self.scroll_arrow_events += 1
         elif key in (curses.KEY_UP, "\x10") and self.history:
             self.hist_pos = max(0, self.hist_pos - 1)
@@ -644,6 +674,8 @@ class App:
                 self.blocks[-1].expanded = not self.blocks[-1].expanded
         elif name == "/clear":
             self.blocks.clear()
+            self.scroll = 0
+            self.scroll_target = None
         elif name == "/raw":
             self.raw_command = command[len(parts[0]):].strip()
             if not self.raw_command:
@@ -710,7 +742,7 @@ class App:
         # growing after the first line, so downward wheel events appeared stuck
         # until that invisible overscroll had been consumed.
         max_scroll = max(0, len(viewport) - prompt_y)
-        self.scroll = min(max_scroll, max(0, self.scroll))
+        self.advance_scroll(max_scroll)
         start = max_scroll - self.scroll
         for y, (line, attr, success) in enumerate(viewport[start:start + prompt_y]):
             if success and line.startswith("✓ "):
@@ -810,12 +842,15 @@ def run_ui(config: Config) -> None:
         set_bracketed_paste(True)
         curses.curs_set(1)
         stdscr.keypad(True)
-        stdscr.timeout(65)
+        stdscr.timeout(20)
+        needs_redraw = True
+        last_render_at = 0.0
         try:
             while not app.should_exit:
                 h, w = stdscr.getmaxyx()
                 try:
                     key = stdscr.get_wch()
+                    needs_redraw = True
                     if raw_sgr:
                         for kind, value in wheel_decoder.feed(key):
                             if kind == "wheel":
@@ -826,7 +861,7 @@ def run_ui(config: Config) -> None:
                         app.key(key, h, w)
                 except curses.error:
                     pass
-                app.poll()
+                needs_redraw = app.poll() or needs_redraw
                 if getattr(app, "raw_command", ""):
                     command = app.raw_command
                     app.raw_command = ""
@@ -866,7 +901,13 @@ def run_ui(config: Config) -> None:
                             stdscr.clear()
                             stdscr.refresh()
                         app._run_pending()
-                app.render(stdscr)
+                        needs_redraw = True
+                # Batch fragmented SGR packets; repaint at most 50 fps.
+                now = time.monotonic()
+                if (needs_redraw or app.is_scrolling) and now - last_render_at >= 0.02:
+                    app.render(stdscr)
+                    last_render_at = now
+                    needs_redraw = False
         finally:
             configure_mouse(False)
             set_bracketed_paste(False)
