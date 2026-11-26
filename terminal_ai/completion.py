@@ -76,8 +76,8 @@ def matching_completions(line: str, choices: tuple[Completion, ...], limit: int 
     # Keep Inshellisense's original order for unrelated commands.
     parts = line.strip().split(maxsplit=1)
     command = parts[0].rsplit("/", 1)[-1] if parts else ""
-    has_arguments = len(line.lstrip().split(maxsplit=1)) > 1 or line.endswith(" ")
-    argument = line.strip().split(maxsplit=1)[1] if len(parts) > 1 else ""
+    has_arguments = len(parts) > 1 or line.endswith(" ")
+    argument = parts[1] if len(parts) > 1 else ""
     context = None
     if has_arguments and command == "cd" and not argument.startswith("-"):
         context = "directory"
