@@ -129,7 +129,7 @@ def _invoke(binary: str, line: str, cwd: Path) -> tuple[Completion, ...]:
         return ()
     if completed.returncode or len(completed.stdout) > 256_000:
         return ()
-    return matching_completions(line, parse_completions(completed.stdout, limit=75))
+    return matching_completions(line, parse_completions(completed.stdout, limit=75), limit=75)
 
 
 class CompletionWorker:
