@@ -54,7 +54,8 @@ class MouseScrollTests(unittest.TestCase):
             self.app.advance_scroll(top_offset, now=10.0)
             self.assertEqual(self.app.scroll, top_offset - 1)
             self.assertEqual(self.app.line, "draft command")
-            self.assertIsNotNone(window.cursor)
+            # The prompt is part of scrollback, so it disappears at the top.
+            self.assertIsNone(window.cursor)
 
     def test_page_up_overscroll_and_resize_are_clamped(self):
         block = self.app.add_block("seq 1 150", "Готово", "Числа от 1 до 150")
@@ -75,7 +76,7 @@ class MouseScrollTests(unittest.TestCase):
             bigger_window = FakeWindow(65, 100)
             self.app.render(bigger_window)
             self.assertLess(self.app.scroll, top)
-            self.assertIsNotNone(bigger_window.cursor)
+            self.assertIsNone(bigger_window.cursor)
 
     def test_arrow_key_wheel_fallback_moves_timeline_with_empty_prompt(self):
         block = self.app.add_block("seq 1 150", "Готово", "Числа")
