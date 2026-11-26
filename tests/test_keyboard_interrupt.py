@@ -7,7 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from terminal_ai.core import load_config
-from terminal_ai.ui import App, read_input_event
+from terminal_ai.ui import App, read_input_event, run_ui
 from terminal_ai.wheel import SGRWheelDecoder
 
 
@@ -56,6 +56,51 @@ class CtrlCInputTests(unittest.TestCase):
         self.assertEqual(self.app.line, "x")
         self.assertFalse(read_input_event(screen, self.app, 24, 90, False, self.decoder))
         self.assertFalse(self.app.should_exit)
+
+    def test_sigint_received_by_curses_main_loop_cancels_without_exit(self):
+        cfg = load_config(Path("/tmp/terminal-ai-nonexistent-ctrlc-tests"))
+        cfg.shell = "/bin/sh"
+        app = Mock()
+        app.should_exit = False
+        app.poll.return_value = False
+        app.is_scrolling = False
+
+        def cancel_input(key, _rows, _cols):
+            self.assertEqual(key, "\x03")
+            app.should_exit = True
+
+        app.key.side_effect = cancel_input
+        screen = Mock()
+        screen.getmaxyx.return_value = (24, 90)
+        installed = []
+        original_handler = signal.default_int_handler
+
+        def fake_signal(_sig, handler):
+            installed.append(handler)
+            return original_handler
+
+        def send_signal():
+            self.assertTrue(installed)
+            installed[0](signal.SIGINT, None)
+            raise curses.error("interrupted")
+
+        screen.get_wch.side_effect = send_signal
+
+        with patch("terminal_ai.ui.App", return_value=app), \
+             patch("terminal_ai.ui.curses.wrapper", side_effect=lambda fn: fn(screen)), \
+             patch("terminal_ai.ui.curses.start_color"), \
+             patch("terminal_ai.ui.curses.use_default_colors"), \
+             patch("terminal_ai.ui.curses.curs_set"), \
+             patch("terminal_ai.ui.configure_colors"), \
+             patch("terminal_ai.ui.configure_mouse", return_value=False), \
+             patch("terminal_ai.ui.set_bracketed_paste"), \
+             patch("terminal_ai.ui.signal.signal", side_effect=fake_signal):
+            run_ui(cfg)
+
+        app.key.assert_called_once_with("\x03", 24, 90)
+        app.stop.assert_called_once()
+        self.assertEqual(len(installed), 2)
+        self.assertIs(installed[-1], original_handler)
 
     def test_curses_ctrl_c_key_still_cancels_normally(self):
         screen = Mock()
