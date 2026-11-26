@@ -48,7 +48,9 @@ class PasteTests(unittest.TestCase):
         previews = [y for y, _, text, _ in screen.writes if text.startswith("  2.") or
                     text.startswith("  3.") or text.startswith("  4.")]
         self.assertEqual(previews, [prompt_y + 1, prompt_y + 2, prompt_y + 3])
-        self.assertTrue(any(y == prompt_y + 4 and "isolated" in text
+        # During an unconfirmed paste the safety notice replaces normal status.
+        self.assertTrue(app.paste_feedback)
+        self.assertTrue(any(y == prompt_y + 4 and app.paste_feedback in text
                             for y, _, text, _ in screen.writes))
         self.assertFalse(app.blocks)
         self.assertFalse(app.pending)
