@@ -1,8 +1,8 @@
-"""Decode xterm SGR wheel events on curses builds without button 5.
+"""Decode xterm SGR wheel and left-press events on older macOS curses.
 
-Mouse reports use ESC [ < button ; column ; row M, where 64 is wheel
-up and 65 is wheel down, possibly with modifier bits. Other mouse
-reports are ignored (not passed into the shell input).
+Mouse reports use ESC [ < button ; column ; row M. Only wheel and
+unmodified left press are accepted; other buttons/motion are ignored.
+No mouse report is ever passed to the command input.
 """
 from __future__ import annotations
 
@@ -21,11 +21,11 @@ class SGRWheelDecoder:
         self.discard = False
         self.drop_remaining = False
 
-    def feed(self, key: str | int) -> list[tuple[str, str | int]]:
+    def feed(self, key: str | int) -> list[tuple[str, str | int | tuple[int, int]]]:
         if isinstance(key, int):
             self.reset()
             return [("key", key)]
-        results: list[tuple[str, str | int]] = []
+        results: list[tuple[str, str | int | tuple[int, int]]] = []
         for char in key:
             if self.drop_remaining:
                 if char in "Mm\r\n":
@@ -47,17 +47,19 @@ class SGRWheelDecoder:
                 continue
             if candidate.startswith(self.PREFIX):
                 if char in "Mm":
-                    # Click reports are discarded: only wheel is supported.
+                    # Keep only wheel events and an unmodified left-button press.
                     params = candidate[len(self.PREFIX):-1].split(";")
                     if not self.discard and len(params) == 3 and all(
                             p.isdecimal() and len(p) <= 8 for p in params):
                         code, x, y = map(int, params)
                         # Wheel codes 64 and 65 plus shift/alt/ctrl bits.
                         if char == "M" and 1 <= x <= 100000 and 1 <= y <= 100000:
-                            code &= ~28
-                            if code == 64:
+                            if code == 0:
+                                # SGR uses 1-based screen coordinates.
+                                results.append(("click", (x - 1, y - 1)))
+                            elif code & ~28 == 64:
                                 results.append(("wheel", "up"))
-                            elif code == 65:
+                            elif code & ~28 == 65:
                                 results.append(("wheel", "down"))
                     self.reset()
                     continue
